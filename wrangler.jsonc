@@ -4,7 +4,14 @@
   "main": "src/index.js",
   "compatibility_date": "2026-05-04",
   "workers_dev": true,
-  "vars": {
-    "JOBS_URL": "https://example.com/jobs"
-  }
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SEEN_JOBS",
+      "id": "5fac9be5ae0c41889e4f4c5c45b853f0",
+      "preview_id": "651676a1513e49a38a6f7212c7bc2351"
+    }
+  ]
 }

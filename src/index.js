@@ -1,130 +1,343 @@
+import { COMPANIES } from './companies.js';
+import { fetchCompanyJobs, isLondonJob } from './parsers.js';
+
+const SEEN_KV_KEY = 'seen-jobs-v1';
+const MAX_DEBUG_JOBS = 100;
+const MAX_TELEGRAM_MESSAGE_LENGTH = 3900;
+const COMPANY_FETCH_CONCURRENCY = 6;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (request.method === 'GET' && url.pathname === '/health') {
-      return new Response('OK', { status: 200 });
-    }
+    try {
+      if (request.method === 'GET' && url.pathname === '/health') {
+        return textResponse('OK');
+      }
 
-    if (request.method === 'POST' && url.pathname === '/webhook') {
-      return handleWebhook(request, env);
-    }
+      if (['GET', 'POST'].includes(request.method) && url.pathname === '/test-telegram') {
+        const message = `london-jobs-watcher test message\n${new Date().toISOString()}`;
+        await sendTelegramMessage(env, message);
+        return jsonResponse({ ok: true, sent: true });
+      }
 
-    return new Response('Not Found', { status: 404 });
+      if (['GET', 'POST'].includes(request.method) && url.pathname === '/run-now') {
+        const shouldNotify = url.searchParams.get('notify') !== 'false';
+        const result = await runWatcher(env, { trigger: 'manual', notify: shouldNotify });
+        const status = result.notification?.error ? 502 : 200;
+        return jsonResponse(summarizeRun(result), { status });
+      }
+
+      if (request.method === 'GET' && url.pathname === '/debug-seen') {
+        const limit = clampNumber(Number(url.searchParams.get('limit') || 25), 1, MAX_DEBUG_JOBS);
+        const seenStore = await loadSeenStore(env);
+        const jobs = Object.entries(seenStore.jobs)
+          .map(([key, value]) => ({ key, ...value }))
+          .sort((a, b) => String(b.firstSeenAt || '').localeCompare(String(a.firstSeenAt || '')))
+          .slice(0, limit);
+
+        return jsonResponse({
+          ok: true,
+          kvKey: SEEN_KV_KEY,
+          count: Object.keys(seenStore.jobs).length,
+          showing: jobs.length,
+          jobs,
+        });
+      }
+
+      return jsonResponse({ ok: false, error: 'Not Found' }, { status: 404 });
+    } catch (error) {
+      console.error('Request failed', error);
+      return jsonResponse({ ok: false, error: errorMessage(error) }, { status: 500 });
+    }
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      runWatcher(env, { trigger: 'scheduled', notify: true }).catch((error) => {
+        console.error('Scheduled run failed', error);
+      }),
+    );
   },
 };
 
-async function handleWebhook(request, env) {
-  let update;
+async function runWatcher(env, options = {}) {
+  const startedAt = new Date();
+  const startedAtIso = startedAt.toISOString();
+  const seenStore = await loadSeenStore(env);
+  const seenJobs = seenStore.jobs;
 
-  try {
-    update = await request.json();
-  } catch {
-    return new Response('Bad Request', { status: 400 });
-  }
+  const enabledCompanies = COMPANIES.filter((company) => company.enabled);
+  const disabledCompanies = COMPANIES.filter((company) => !company.enabled);
 
-  const message = update?.message;
-  const text = message?.text || '';
-  const chatId = message?.chat?.id;
+  const run = {
+    ok: true,
+    trigger: options.trigger || 'manual',
+    startedAt: startedAtIso,
+    finishedAt: null,
+    checkedCompanies: enabledCompanies.length,
+    disabledCompanies: disabledCompanies.length,
+    totalJobsFound: 0,
+    londonJobsFound: 0,
+    firstSeenJobs: 0,
+    newLondonJobs: [],
+    failures: [],
+    notification: {
+      attempted: false,
+      sent: false,
+      error: null,
+    },
+  };
 
-  if (!chatId) {
-    return new Response('OK', { status: 200 });
-  }
+  const companyResults = await mapWithConcurrency(
+    enabledCompanies,
+    COMPANY_FETCH_CONCURRENCY,
+    async (company) => checkCompany(company),
+  );
 
-  if (text.trim() !== '/jobs') {
-    await sendTelegramMessage(env, chatId, 'Send /jobs to fetch London roles.');
-    return new Response('OK', { status: 200 });
-  }
+  const processedKeys = new Set();
+  let seenStoreChanged = false;
 
-  try {
-    if (!env.JOBS_URL) throw new Error('JOBS_URL is not set.');
-    if (!env.TELEGRAM_BOT_TOKEN) throw new Error('Bot token is missing.');
-
-    const htmlResponse = await fetch(env.JOBS_URL);
-    if (!htmlResponse.ok) {
-      throw new Error(`Jobs page returned ${htmlResponse.status}.`);
-    }
-
-    const html = await htmlResponse.text();
-    const matches = findLondonLinks(html, env.JOBS_URL).slice(0, 10);
-
-    if (matches.length === 0) {
-      await sendTelegramMessage(env, chatId, 'No London jobs found.');
-      return new Response('OK', { status: 200 });
-    }
-
-    const lines = matches.map((item, i) => `${i + 1}. ${item.text}\n${item.url}`);
-    const reply = `London jobs found (${matches.length}):\n\n${lines.join('\n\n')}`;
-    await sendTelegramMessage(env, chatId, reply);
-
-    return new Response('OK', { status: 200 });
-  } catch (error) {
-    await sendTelegramMessage(env, chatId, `Error: ${String(error.message || error).slice(0, 180)}`);
-    return new Response('OK', { status: 200 });
-  }
-}
-
-function findLondonLinks(html, baseUrl) {
-  const linkRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  const results = [];
-  const seen = new Set();
-  let match;
-
-  while ((match = linkRegex.exec(html)) !== null) {
-    const href = match[1];
-    const anchorInner = stripHtml(match[2]).replace(/\s+/g, ' ').trim();
-
-    const contextStart = Math.max(0, match.index - 200);
-    const contextEnd = Math.min(html.length, linkRegex.lastIndex + 200);
-    const context = stripHtml(html.slice(contextStart, contextEnd));
-
-    if (!/london/i.test(context)) continue;
-
-    let absolute;
-    try {
-      absolute = new URL(href, baseUrl).toString();
-    } catch {
+  for (const companyResult of companyResults) {
+    if (!companyResult.ok) {
+      run.failures.push(companyResult.failure);
       continue;
     }
 
-    if (seen.has(absolute)) continue;
-    seen.add(absolute);
+    run.totalJobsFound += companyResult.jobs.length;
 
-    results.push({
-      text: anchorInner || 'Job link',
-      url: absolute,
+    for (const job of companyResult.jobs) {
+      if (!job?.key || processedKeys.has(job.key)) continue;
+      processedKeys.add(job.key);
+
+      const londonJob = isLondonJob(job);
+      if (londonJob) run.londonJobsFound += 1;
+
+      if (seenJobs[job.key]) continue;
+
+      run.firstSeenJobs += 1;
+      seenStoreChanged = true;
+      seenJobs[job.key] = {
+        firstSeenAt: startedAtIso,
+        company: job.company,
+        title: job.title,
+        location: job.location || job.office || '',
+        url: job.url,
+      };
+
+      if (londonJob) {
+        run.newLondonJobs.push({
+          company: job.company,
+          title: job.title,
+          location: job.location || job.office || 'Location not listed',
+          url: job.url,
+        });
+      }
+    }
+  }
+
+  run.newLondonJobs.sort((a, b) => {
+    const byCompany = a.company.localeCompare(b.company);
+    return byCompany || a.title.localeCompare(b.title);
+  });
+
+  const shouldNotify = options.notify !== false && run.newLondonJobs.length > 0;
+
+  if (shouldNotify) {
+    run.notification.attempted = true;
+    try {
+      await sendTelegramMessage(env, formatTelegramRunMessage(run));
+      run.notification.sent = true;
+    } catch (error) {
+      run.notification.error = errorMessage(error);
+      console.error('Telegram notification failed', error);
+    }
+  }
+
+  if (seenStoreChanged && (!shouldNotify || run.notification.sent)) {
+    await saveSeenStore(env, {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      jobs: seenJobs,
     });
   }
 
-  return results;
+  run.finishedAt = new Date().toISOString();
+  console.log(
+    `Run finished: ${run.newLondonJobs.length} new London jobs, ${run.failures.length} failures`,
+  );
+
+  return run;
 }
 
-function stripHtml(input) {
-  return input
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&#39;/gi, "'")
-    .replace(/&quot;/gi, '"');
+async function checkCompany(company) {
+  try {
+    const jobs = await fetchCompanyJobs(company);
+    console.log(`${company.name}: ${jobs.length} jobs found`);
+    return { ok: true, company: company.name, jobs };
+  } catch (error) {
+    const failure = {
+      company: company.name,
+      parserType: company.parserType,
+      url: company.url,
+      error: errorMessage(error),
+    };
+    console.error(`${company.name}: ${failure.error}`);
+    return { ok: false, failure };
+  }
 }
 
-async function sendTelegramMessage(env, chatId, text) {
+async function loadSeenStore(env) {
+  assertKvBinding(env);
+
+  const raw = await env.SEEN_JOBS.get(SEEN_KV_KEY);
+  if (!raw) return { version: 1, jobs: {} };
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`KV key ${SEEN_KV_KEY} does not contain valid JSON`);
+  }
+
+  if (parsed?.jobs && typeof parsed.jobs === 'object' && !Array.isArray(parsed.jobs)) {
+    return { version: parsed.version || 1, jobs: parsed.jobs };
+  }
+
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return { version: 1, jobs: parsed };
+  }
+
+  throw new Error(`KV key ${SEEN_KV_KEY} has an unsupported shape`);
+}
+
+async function saveSeenStore(env, seenStore) {
+  assertKvBinding(env);
+  await env.SEEN_JOBS.put(SEEN_KV_KEY, JSON.stringify(seenStore));
+}
+
+function assertKvBinding(env) {
+  if (!env.SEEN_JOBS) {
+    throw new Error('KV binding SEEN_JOBS is missing. Check wrangler.jsonc.');
+  }
+}
+
+async function sendTelegramMessage(env, text) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  }
+
+  if (!env.TELEGRAM_CHAT_ID) {
+    throw new Error('TELEGRAM_CHAT_ID is not set');
+  }
+
   const endpoint = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      chat_id: chatId,
+      chat_id: env.TELEGRAM_CHAT_ID,
       text,
       disable_web_page_preview: true,
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`Telegram sendMessage failed (${response.status}).`);
+    const body = await response.text().catch(() => '');
+    throw new Error(`Telegram sendMessage failed (${response.status}): ${body.slice(0, 200)}`);
   }
+}
+
+function formatTelegramRunMessage(run) {
+  const count = run.newLondonJobs.length;
+  const lines = [`${count} new London jobs found`, ''];
+  let omitted = 0;
+
+  for (const job of run.newLondonJobs) {
+    const block = `${job.company} — ${job.title}\n${job.location}\n${job.url}`;
+    const candidate = [...lines, block, ''].join('\n');
+
+    if (candidate.length > MAX_TELEGRAM_MESSAGE_LENGTH) {
+      omitted += 1;
+      continue;
+    }
+
+    lines.push(block, '');
+  }
+
+  if (omitted > 0) {
+    lines.push(`${omitted} more job${omitted === 1 ? '' : 's'} omitted from this message.`, '');
+  }
+
+  if (run.failures.length > 0) {
+    const failedCompanies = run.failures.map((failure) => failure.company);
+    lines.push(
+      `Warning: ${run.failures.length} compan${run.failures.length === 1 ? 'y' : 'ies'} failed: ${failedCompanies.join(', ')}`,
+    );
+  }
+
+  return lines.join('\n').trim();
+}
+
+function summarizeRun(run) {
+  return {
+    ok: run.ok,
+    trigger: run.trigger,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    checkedCompanies: run.checkedCompanies,
+    disabledCompanies: run.disabledCompanies,
+    totalJobsFound: run.totalJobsFound,
+    londonJobsFound: run.londonJobsFound,
+    firstSeenJobs: run.firstSeenJobs,
+    newLondonJobsCount: run.newLondonJobs.length,
+    newLondonJobs: run.newLondonJobs,
+    failures: run.failures,
+    notification: run.notification,
+    kvKey: SEEN_KV_KEY,
+  };
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = new Array(Math.min(limit, items.length)).fill(null).map(async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+function jsonResponse(data, init = {}) {
+  return new Response(JSON.stringify(data, null, 2), {
+    ...init,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      ...init.headers,
+    },
+  });
+}
+
+function textResponse(text, init = {}) {
+  return new Response(text, {
+    ...init,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      ...init.headers,
+    },
+  });
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function errorMessage(error) {
+  return String(error?.message || error || 'Unknown error');
 }
