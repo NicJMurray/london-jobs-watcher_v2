@@ -52,6 +52,7 @@ async function fetchGreenhouseJobs(company) {
       location,
       office,
       url: job.absolute_url,
+      postedAt: job.first_published || job.updated_at,
       searchText: [job.title, location, office].join(' '),
     });
   });
@@ -74,6 +75,7 @@ async function fetchLeverJobs(company) {
       location,
       office,
       url: job.hostedUrl || job.applyUrl,
+      postedAt: normalizeLeverTimestamp(job.createdAt),
       searchText: [job.text, location, office, job.categories?.team, job.categories?.department].join(' '),
     });
   });
@@ -96,6 +98,7 @@ async function fetchAshbyJobs(company) {
       location,
       office,
       url: job.jobUrl || job.applyUrl,
+      postedAt: job.publishedAt,
       searchText: [job.title, location, office].join(' '),
     });
   });
@@ -119,6 +122,7 @@ async function fetchHtmlJobs(company) {
         location: locationFromText(link.filterText),
         office: locationFromText(link.filterText),
         url: link.url,
+        postedAt: '',
         searchText: link.filterText,
       }),
     );
@@ -287,9 +291,23 @@ function normalizeJob(company, job) {
     location,
     office,
     url,
+    postedAt: normalizeDate(job.postedAt),
     parserType: company.parserType,
     searchText: normalizeWhitespace(job.searchText || [title, location, office].join(' ')),
   };
+}
+
+function normalizeLeverTimestamp(value) {
+  if (!value) return '';
+  if (typeof value === 'number') return normalizeDate(new Date(value).toISOString());
+  return normalizeDate(value);
+}
+
+function normalizeDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString();
 }
 
 function collectNames(value) {

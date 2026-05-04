@@ -21,6 +21,13 @@ export default {
         return jsonResponse({ ok: true, sent: true });
       }
 
+      if (['GET', 'POST'].includes(request.method) && url.pathname === '/test-latest-jobs') {
+        const includeDisabled = url.searchParams.get('includeDisabled') === 'true';
+        const result = await runLatestJobsTest(env, { includeDisabled });
+        const status = result.notification?.error ? 502 : 200;
+        return jsonResponse(result, { status });
+      }
+
       if (['GET', 'POST'].includes(request.method) && url.pathname === '/run-now') {
         const shouldNotify = url.searchParams.get('notify') !== 'false';
         const result = await runWatcher(env, { trigger: 'manual', notify: shouldNotify });
@@ -170,6 +177,85 @@ async function runWatcher(env, options = {}) {
   return run;
 }
 
+async function runLatestJobsTest(env, options = {}) {
+  const startedAt = new Date().toISOString();
+  const companies = COMPANIES.filter((company) => options.includeDisabled || company.enabled);
+  const disabledCompanies = COMPANIES.filter((company) => !company.enabled);
+  const companyResults = await mapWithConcurrency(
+    companies,
+    COMPANY_FETCH_CONCURRENCY,
+    async (company) => checkCompany(company),
+  );
+
+  const latestJobs = [];
+  const noJobs = [];
+  const failures = [];
+
+  for (const companyResult of companyResults) {
+    if (!companyResult.ok) {
+      failures.push(companyResult.failure);
+      continue;
+    }
+
+    const latestJob = pickLatestJob(companyResult.jobs);
+    if (!latestJob) {
+      noJobs.push(companyResult.company);
+      continue;
+    }
+
+    latestJobs.push({
+      company: latestJob.company,
+      title: latestJob.title,
+      location: latestJob.location || latestJob.office || 'Location not listed',
+      url: latestJob.url,
+      postedAt: latestJob.postedAt || '',
+      londonMatch: isLondonJob(latestJob),
+    });
+  }
+
+  latestJobs.sort((a, b) => a.company.localeCompare(b.company));
+  noJobs.sort((a, b) => a.localeCompare(b));
+
+  const messages = formatLatestJobsTestMessages({
+    startedAt,
+    checkedCompanies: companies.length,
+    disabledCompanies: options.includeDisabled ? 0 : disabledCompanies.length,
+    latestJobs,
+    noJobs,
+    failures,
+  });
+
+  const notification = {
+    attempted: true,
+    sent: false,
+    messages: messages.length,
+    error: null,
+  };
+
+  try {
+    for (const message of messages) {
+      await sendTelegramMessage(env, message);
+    }
+    notification.sent = true;
+  } catch (error) {
+    notification.error = errorMessage(error);
+    console.error('Latest jobs test Telegram notification failed', error);
+  }
+
+  return {
+    ok: !notification.error,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    checkedCompanies: companies.length,
+    disabledCompanies: options.includeDisabled ? 0 : disabledCompanies.length,
+    latestJobsCount: latestJobs.length,
+    noJobs,
+    failures,
+    notification,
+    latestJobs,
+  };
+}
+
 async function checkCompany(company) {
   try {
     const jobs = await fetchCompanyJobs(company);
@@ -185,6 +271,17 @@ async function checkCompany(company) {
     console.error(`${company.name}: ${failure.error}`);
     return { ok: false, failure };
   }
+}
+
+function pickLatestJob(jobs) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return null;
+
+  return jobs
+    .map((job, index) => ({ job, index, timestamp: timestampFromDate(job.postedAt) }))
+    .sort((a, b) => {
+      if (a.timestamp !== b.timestamp) return b.timestamp - a.timestamp;
+      return a.index - b.index;
+    })[0].job;
 }
 
 async function loadSeenStore(env) {
@@ -279,6 +376,64 @@ function formatTelegramRunMessage(run) {
   return lines.join('\n').trim();
 }
 
+function formatLatestJobsTestMessages(result) {
+  const blocks = result.latestJobs.map((job) => {
+    const lines = [
+      `${job.company} — ${job.title}`,
+      job.location,
+    ];
+
+    if (job.postedAt) {
+      lines.push(`Posted: ${formatDateForMessage(job.postedAt)}`);
+    }
+
+    lines.push(`London match: ${job.londonMatch ? 'yes' : 'no'}`);
+    lines.push(job.url);
+    return lines.join('\n');
+  });
+
+  if (result.noJobs.length > 0) {
+    blocks.push(`No parsed jobs: ${result.noJobs.join(', ')}`);
+  }
+
+  if (result.failures.length > 0) {
+    blocks.push(`Failed companies: ${result.failures.map((failure) => failure.company).join(', ')}`);
+  }
+
+  const summaryLines = [
+    'Latest job listing test',
+    `${result.latestJobs.length} companies with parsed jobs`,
+    `${result.checkedCompanies} checked, ${result.disabledCompanies} disabled skipped`,
+  ];
+
+  return chunkTelegramBlocks(summaryLines.join('\n'), blocks);
+}
+
+function chunkTelegramBlocks(header, blocks) {
+  const chunks = [];
+  let current = [];
+
+  for (const block of blocks) {
+    const candidateBlocks = [...current, block];
+    const candidate = `${header}\n\n${candidateBlocks.join('\n\n')}`;
+
+    if (candidate.length > MAX_TELEGRAM_MESSAGE_LENGTH && current.length > 0) {
+      chunks.push(current);
+      current = [block];
+    } else {
+      current = candidateBlocks;
+    }
+  }
+
+  if (current.length > 0) chunks.push(current);
+  if (chunks.length === 0) return [header];
+
+  return chunks.map((chunk, index) => {
+    const chunkHeader = chunks.length > 1 ? `${header}\nPart ${index + 1}/${chunks.length}` : header;
+    return `${chunkHeader}\n\n${chunk.join('\n\n')}`;
+  });
+}
+
 function summarizeRun(run) {
   return {
     ok: run.ok,
@@ -340,4 +495,16 @@ function clampNumber(value, min, max) {
 
 function errorMessage(error) {
   return String(error?.message || error || 'Unknown error');
+}
+
+function timestampFromDate(value) {
+  if (!value) return 0;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function formatDateForMessage(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toISOString().slice(0, 10);
 }

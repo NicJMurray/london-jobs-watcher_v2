@@ -114,6 +114,12 @@ Send a Telegram test message:
 curl http://localhost:8787/test-telegram
 ```
 
+Send one current/latest parsed job per enabled company as a Telegram test digest:
+
+```bash
+curl http://localhost:8787/test-latest-jobs
+```
+
 Run the watcher manually and send Telegram only if new London jobs are found:
 
 ```bash
@@ -166,6 +172,7 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 
 - `GET /health` returns `OK`
 - `GET or POST /test-telegram` sends a Telegram test message
+- `GET or POST /test-latest-jobs` sends one current/latest parsed job per enabled company without changing KV
 - `GET or POST /run-now` checks companies immediately and sends a Telegram alert only if new London jobs are found
 - `GET /run-now?notify=false` checks companies without sending Telegram
 - `GET /debug-seen` shows the current KV dedupe count and recent seen jobs
