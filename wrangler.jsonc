@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "london-jobs-watcher",
+  "main": "src/index.js",
+  "compatibility_date": "2026-05-04",
+  "workers_dev": true,
+  "vars": {
+    "JOBS_URL": "https://example.com/jobs"
+  }
+}
