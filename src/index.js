@@ -1,5 +1,3 @@
-const CHAT_ID_KEY = 'config:chat_id';
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -13,10 +11,6 @@ export default {
     }
 
     return new Response('Not Found', { status: 404 });
-  },
-
-  async scheduled(_event, env) {
-    await runJobsCheck(env);
   },
 };
 
@@ -43,57 +37,31 @@ async function handleWebhook(request, env) {
   }
 
   try {
-    await env.JOBS_KV.put(CHAT_ID_KEY, String(chatId));
-    await runJobsCheck(env, String(chatId));
+    if (!env.JOBS_URL) throw new Error('JOBS_URL is not set.');
+    if (!env.TELEGRAM_BOT_TOKEN) throw new Error('Bot token is missing.');
+
+    const htmlResponse = await fetch(env.JOBS_URL);
+    if (!htmlResponse.ok) {
+      throw new Error(`Jobs page returned ${htmlResponse.status}.`);
+    }
+
+    const html = await htmlResponse.text();
+    const matches = findLondonLinks(html, env.JOBS_URL).slice(0, 10);
+
+    if (matches.length === 0) {
+      await sendTelegramMessage(env, chatId, 'No London jobs found.');
+      return new Response('OK', { status: 200 });
+    }
+
+    const lines = matches.map((item, i) => `${i + 1}. ${item.text}\n${item.url}`);
+    const reply = `London jobs found (${matches.length}):\n\n${lines.join('\n\n')}`;
+    await sendTelegramMessage(env, chatId, reply);
+
     return new Response('OK', { status: 200 });
   } catch (error) {
     await sendTelegramMessage(env, chatId, `Error: ${String(error.message || error).slice(0, 180)}`);
     return new Response('OK', { status: 200 });
   }
-}
-
-async function runJobsCheck(env, explicitChatId) {
-  if (!env.JOBS_URL) throw new Error('JOBS_URL is not set.');
-  if (!env.TELEGRAM_BOT_TOKEN) throw new Error('Bot token is missing.');
-  if (!env.JOBS_KV) throw new Error('JOBS_KV binding is missing.');
-
-  const chatId = explicitChatId || (await env.JOBS_KV.get(CHAT_ID_KEY));
-  if (!chatId) return;
-
-  const htmlResponse = await fetch(env.JOBS_URL);
-  if (!htmlResponse.ok) {
-    throw new Error(`Jobs page returned ${htmlResponse.status}.`);
-  }
-
-  const html = await htmlResponse.text();
-  const matches = findLondonLinks(html, env.JOBS_URL);
-
-  if (matches.length === 0) {
-    await sendTelegramMessage(env, chatId, 'No London jobs found.');
-    return;
-  }
-
-  const unseen = [];
-
-  for (const match of matches) {
-    const key = keyForUrl(match.url);
-    const alreadySeen = await env.JOBS_KV.get(key);
-    if (alreadySeen) continue;
-
-    unseen.push(match);
-    await env.JOBS_KV.put(key, '1');
-
-    if (unseen.length >= 10) break;
-  }
-
-  if (unseen.length === 0) {
-    await sendTelegramMessage(env, chatId, 'No new London jobs found.');
-    return;
-  }
-
-  const lines = unseen.map((item, i) => `${i + 1}. ${item.text}\n${item.url}`);
-  const reply = `New London jobs (${unseen.length}):\n\n${lines.join('\n\n')}`;
-  await sendTelegramMessage(env, chatId, reply);
 }
 
 function findLondonLinks(html, baseUrl) {
@@ -129,10 +97,6 @@ function findLondonLinks(html, baseUrl) {
   }
 
   return results;
-}
-
-function keyForUrl(url) {
-  return `seen:${url}`;
 }
 
 function stripHtml(input) {
