@@ -230,6 +230,13 @@ Supported `parserType` values:
 - `greenhouse` for `https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`
 - `lever` for `https://api.lever.co/v0/postings/{site}?mode=json`
 - `ashby` for `https://api.ashbyhq.com/posting-api/job-board/{job_board_name}?includeCompensation=false`
+- `spotify` for Spotify's public Life at Spotify jobs API
+- `successfactors` for SAP SuccessFactors Recruiting jobs APIs, currently used for BBC
+- `workable` for Workable-style job listing feeds, currently used for Starling Bank
+- `jibe` for Jibe/iCIMS careers search APIs, currently used for Garmin
+- `eightfold-embedded` for Eightfold pages that embed job data in server-rendered HTML, currently used for Netflix
+- `apple` for Apple's paginated jobs search data
+- `next-greenhouse` for sites that embed Greenhouse jobs in Next.js page data
 - `html` for basic fetch-based link parsing
 
 To temporarily stop checking a company, set:

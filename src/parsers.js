@@ -14,6 +14,16 @@ export async function fetchCompanyJobs(company) {
       return fetchAshbyJobs(company);
     case 'apple':
       return fetchAppleJobs(company);
+    case 'spotify':
+      return fetchSpotifyJobs(company);
+    case 'successfactors':
+      return fetchSuccessFactorsJobs(company);
+    case 'workable':
+      return fetchWorkableJobs(company);
+    case 'jibe':
+      return fetchJibeJobs(company);
+    case 'eightfold-embedded':
+      return fetchEightfoldEmbeddedJobs(company);
     case 'next-greenhouse':
       return fetchNextGreenhouseJobs(company);
     case 'html':
@@ -46,7 +56,39 @@ async function fetchNextGreenhouseJobs(company) {
 }
 
 async function fetchAppleJobs(company) {
-  const html = await fetchText(company.url);
+  const jobs = [];
+  const seenIds = new Set();
+  const maxPages = company.maxPages || 10;
+  let totalRecords = 0;
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const html = await fetchText(urlWithSearchParam(company.url, 'page', page === 1 ? '' : String(page)));
+    const hydrationData = extractAppleHydrationData(html);
+    const searchData = hydrationData?.loaderData?.search;
+    const pageJobs = Array.isArray(searchData?.searchResults) ? searchData.searchResults : [];
+
+    if (!pageJobs.length) {
+      if (page === 1) return extractAppleHtmlJobs(company, html);
+      break;
+    }
+
+    totalRecords = Number(searchData.totalRecords || totalRecords || 0);
+
+    for (const job of pageJobs) {
+      const id = normalizeWhitespace(String(job.reqId || job.id || job.positionId || ''));
+      if (!id || seenIds.has(id)) continue;
+
+      seenIds.add(id);
+      jobs.push(mapAppleJob(company, job));
+    }
+
+    if (totalRecords > 0 && seenIds.size >= totalRecords) break;
+  }
+
+  return jobs;
+}
+
+function extractAppleHtmlJobs(company, html) {
   const itemRegex = /<div id="search-search-job-title-PIPE-([^"]+)"[\s\S]*?<h3>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h3>[\s\S]*?<span class="job-posted-date"[^>]*>([\s\S]*?)<\/span>[\s\S]*?<span class="table--advanced-search__location-sub"[^>]*>([\s\S]*?)<\/span>/gi;
   const jobs = [];
   let match;
@@ -72,6 +114,303 @@ async function fetchAppleJobs(company) {
   }
 
   return jobs;
+}
+
+function mapAppleJob(company, job) {
+  const title = stripHtml(job.postingTitle);
+  const location = normalizeWhitespace(
+    arrayFrom(job.locations)
+      .map((locationItem) => {
+        if (!locationItem || typeof locationItem !== 'object') return '';
+        return [locationItem.name, locationItem.city, locationItem.stateProvince, locationItem.countryName]
+          .filter(Boolean)
+          .join(', ');
+      })
+      .filter(Boolean)
+      .join('; '),
+  );
+  const id = normalizeWhitespace(String(job.reqId || job.id || job.positionId || ''));
+  const detailId = id.replace(/^PIPE-/i, '') || job.positionId || id;
+  const detailSlug = job.transformedPostingTitle || slugify(title);
+  const url = appleDetailUrl(company.url, detailId, detailSlug, job.team?.teamCode);
+  const team = normalizeWhitespace(job.team?.teamName || '');
+
+  return normalizeJob(company, {
+    id: id || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: job.postDateInGMT || job.postingDate,
+    searchText: [title, location, team, job.jobSummary].join(' '),
+  });
+}
+
+function extractAppleHydrationData(html) {
+  const match = html.match(/window\.__staticRouterHydrationData\s*=\s*JSON\.parse\(("(?:(?:\\.)|[^"\\])*")\)/);
+  if (!match) return null;
+
+  try {
+    return JSON.parse(JSON.parse(match[1]));
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSpotifyJobs(company) {
+  const data = await fetchJson(company.url);
+  const jobs = Array.isArray(data?.result) ? data.result : [];
+
+  return jobs.map((job) => {
+    const title = stripHtml(job.text);
+    const locations = uniqueStrings(arrayFrom(job.locations).map((location) => location?.location).filter(Boolean));
+    const location = normalizeWhitespace(locations.join(', '));
+    const category = normalizeWhitespace(
+      [job.main_category?.name, job.sub_category?.name, job.job_type?.name].filter(Boolean).join(', '),
+    );
+    const url = canonicalUrl(`${company.careersUrl || 'https://www.lifeatspotify.com/jobs'}/${job.id}`, company.url);
+
+    return normalizeJob(company, {
+      id: job.id || url,
+      title,
+      location,
+      office: location,
+      url,
+      postedAt: '',
+      searchText: [title, location, category].join(' '),
+    });
+  });
+}
+
+async function fetchSuccessFactorsJobs(company) {
+  const locale = company.locale || 'en_GB';
+  const locationQuery = company.locationQuery || 'London';
+  const sortBy = company.sortBy || 'recent';
+  const keywords = company.keywords || '';
+  const maxPages = company.maxPages || 10;
+  const passes = company.passes || 2;
+  const jobs = [];
+  const seenIds = new Set();
+  let totalJobs = 0;
+
+  for (let pass = 0; pass < passes; pass += 1) {
+    for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+      const data = await postJson(company.url, {
+        keywords,
+        locale,
+        location: locationQuery,
+        pageNumber,
+        sortBy,
+      });
+      const pageJobs = Array.isArray(data?.jobSearchResult)
+        ? data.jobSearchResult.map((item) => item?.response || item).filter(Boolean)
+        : [];
+
+      if (!pageJobs.length) break;
+
+      totalJobs = Number(data?.totalJobs || totalJobs || 0);
+
+      for (const job of pageJobs) {
+        const id = normalizeWhitespace(String(job.id || job.jobReqId || job.requisitionId || ''));
+        if (!id || seenIds.has(id)) continue;
+
+        seenIds.add(id);
+        jobs.push(mapSuccessFactorsJob(company, job, locale));
+      }
+
+      if (totalJobs > 0 && seenIds.size >= totalJobs) break;
+    }
+
+    if (totalJobs > 0 && seenIds.size >= totalJobs) break;
+  }
+
+  return jobs;
+}
+
+async function fetchWorkableJobs(company) {
+  const data = await fetchJson(company.url);
+  const jobs = Array.isArray(data?.jobs) ? data.jobs : Array.isArray(data) ? data : [];
+  const groupedJobs = new Map();
+
+  for (const job of jobs) {
+    const id = normalizeWhitespace(String(job.shortcode || job.id || job.url || job.shortlink || ''));
+    if (!id) continue;
+
+    const existing = groupedJobs.get(id);
+    const location = workableLocation(job);
+
+    if (existing) {
+      if (location) existing.locations.add(location);
+      continue;
+    }
+
+    groupedJobs.set(id, {
+      job,
+      locations: new Set(location ? [location] : []),
+    });
+  }
+
+  return [...groupedJobs.values()].map(({ job, locations }) => {
+    const title = stripHtml(job.title);
+    const location = normalizeWhitespace([...locations].join('; '));
+    const department = normalizeWhitespace([job.department, job.function, job.employment_type].filter(Boolean).join(', '));
+
+    return normalizeJob(company, {
+      id: job.shortcode || job.id || job.url || job.shortlink,
+      title,
+      location,
+      office: location,
+      url: job.url || job.shortlink || job.application_url,
+      postedAt: job.published_on || job.created_at,
+      searchText: [title, location, department].join(' '),
+    });
+  });
+}
+
+async function fetchJibeJobs(company) {
+  const jobs = [];
+  const seenIds = new Set();
+  const limit = company.limit || 100;
+  const maxPages = company.maxPages || 5;
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = urlWithSearchParam(company.url, 'page', page === 1 ? '' : String(page));
+    const data = await fetchJibeJson(url);
+    const pageJobs = Array.isArray(data?.jobs) ? data.jobs : [];
+
+    if (!pageJobs.length) break;
+
+    for (const item of pageJobs) {
+      const job = item?.data || item;
+      const id = normalizeWhitespace(String(job.req_id || job.slug || job.id || job.apply_url || ''));
+      if (!id || seenIds.has(id)) continue;
+
+      seenIds.add(id);
+      jobs.push(mapJibeJob(company, job));
+    }
+
+    if (Number(data?.totalCount || 0) <= seenIds.size || pageJobs.length < limit) break;
+  }
+
+  return jobs;
+}
+
+async function fetchJibeJson(url) {
+  try {
+    return await fetchJson(url);
+  } catch (error) {
+    if (!/HTTP 404|Expected JSON/i.test(errorMessage(error))) throw error;
+    await delay(350);
+    return fetchJson(url);
+  }
+}
+
+async function fetchEightfoldEmbeddedJobs(company) {
+  const html = await fetchText(company.url);
+  const data = extractCodeJson(html, ['smartApplyData', 'pcs-data', 'pcsx-data']);
+  const jobs = Array.isArray(data?.positions) ? data.positions : [];
+
+  return jobs.map((job) => {
+    const title = stripHtml(job.posting_name || job.name);
+    const locations = uniqueStrings([job.location, ...arrayFrom(job.locations)].filter(Boolean));
+    const location = normalizeWhitespace(locations.join('; '));
+    const url = job.canonicalPositionUrl || canonicalUrl(`/careers/job/${job.id}`, company.url);
+    const department = normalizeWhitespace(
+      [job.department, job.business_unit, job.work_location_option].filter(Boolean).join(', '),
+    );
+
+    return normalizeJob(company, {
+      id: job.ats_job_id || job.display_job_id || job.id_locale || job.id || url,
+      title,
+      location,
+      office: location,
+      url,
+      postedAt: normalizeUnixTimestamp(job.t_create || job.t_update),
+      searchText: [title, location, department].join(' '),
+    });
+  });
+}
+
+function mapSuccessFactorsJob(company, job, locale) {
+  const title = stripHtml(job.unifiedStandardTitle || job.title || job.jobTitle);
+  const location = normalizeWhitespace(
+    uniqueStrings([
+      ...arrayFrom(job.sfstd_jobLocation_obj).map(stripHtml),
+      ...arrayFrom(job.jobLocationShort).map(stripHtml),
+    ]).join(', '),
+  );
+  const department = uniqueStrings([...arrayFrom(job.filter2), ...arrayFrom(job.filter4)]).map(stripHtml).join(', ');
+  const id = normalizeWhitespace(String(job.id || job.jobReqId || job.requisitionId || ''));
+  const urlTitle = normalizeWhitespace(decodeHtml(job.urlTitle || job.unifiedUrlTitle || slugify(title)));
+  const baseUrl = (company.careersUrl || new URL(company.url).origin).replace(/\/$/, '');
+  const url = `${baseUrl}/job/${urlTitle}/${id}-${locale}/`;
+
+  return normalizeJob(company, {
+    id: id || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: normalizeSuccessFactorsDate(job.unifiedStandardStart || job.postedDate),
+    searchText: [title, location, department].join(' '),
+  });
+}
+
+function extractCodeJson(html, ids) {
+  for (const id of ids) {
+    const pattern = new RegExp(`<code id="${escapeRegExp(id)}"[^>]*>([\\s\\S]*?)<\\/code>`);
+    const match = html.match(pattern);
+    if (!match) continue;
+
+    try {
+      return JSON.parse(decodeHtml(match[1]));
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function workableLocation(job) {
+  const locations = arrayFrom(job.locations)
+    .map((location) => {
+      if (!location || typeof location !== 'object') return '';
+      return [location.city, location.region || location.state, location.country].filter(Boolean).join(', ');
+    })
+    .filter(Boolean);
+
+  if (locations.length > 0) return uniqueStrings(locations).join('; ');
+
+  return [job.city, job.state, job.country].filter(Boolean).join(', ');
+}
+
+function mapJibeJob(company, job) {
+  const title = stripHtml(job.title);
+  const location = normalizeWhitespace(
+    job.full_location
+      || job.short_location
+      || [job.location_name, job.city, job.state, job.country].filter(Boolean).join(', '),
+  );
+  const tags = [
+    ...collectNames(job.categories),
+    ...collectNames(job.tags),
+    ...arrayFrom(job.tags1),
+    ...arrayFrom(job.tags2),
+    ...arrayFrom(job.tags3),
+    job.employment_type,
+  ];
+  const url = job.apply_url || canonicalUrl(`/jobs/${job.slug || job.req_id}`, company.url);
+
+  return normalizeJob(company, {
+    id: job.req_id || job.slug || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: job.posted_date || job.create_date || job.update_date,
+    searchText: [title, location, uniqueStrings(tags).join(', ')].join(' '),
+  });
 }
 
 export function isLondonJob(job) {
@@ -344,6 +683,28 @@ async function fetchJson(url) {
   }
 }
 
+async function postJson(url, body) {
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Expected JSON but received: ${text.slice(0, 160)}`);
+  }
+}
+
 async function fetchText(url) {
   const response = await fetchWithTimeout(url, {
     headers: { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
@@ -375,6 +736,10 @@ async function fetchWithTimeout(url, init = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeJob(company, job) {
@@ -410,6 +775,20 @@ function normalizeAppleDate(value) {
   return normalizeDate(`${normalized} 00:00:00 GMT`);
 }
 
+function normalizeSuccessFactorsDate(value) {
+  const normalized = normalizeWhitespace(value);
+  const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (match) return normalizeDate(`${match[3]}-${match[2]}-${match[1]}T00:00:00Z`);
+  return normalizeDate(normalized);
+}
+
+function normalizeUnixTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return normalizeDate(new Date(value * 1000).toISOString());
+  }
+  return normalizeDate(value);
+}
+
 function normalizeDate(value) {
   if (!value) return '';
   const date = new Date(value);
@@ -441,6 +820,64 @@ function canonicalUrl(input, baseUrl) {
   } catch {
     return '';
   }
+}
+
+function appleDetailUrl(searchUrl, id, slug, teamCode) {
+  try {
+    const parsed = new URL(searchUrl);
+    const locale = parsed.pathname.split('/').filter(Boolean)[0] || 'en-us';
+    const detailUrl = new URL(`/${locale}/details/${encodeURIComponent(id)}/${encodeURIComponent(slug)}`, parsed.origin);
+
+    if (teamCode) detailUrl.searchParams.set('team', teamCode);
+    return detailUrl.toString();
+  } catch {
+    return searchUrl;
+  }
+}
+
+function urlWithSearchParam(url, key, value) {
+  const parsed = new URL(url);
+  if (value) {
+    parsed.searchParams.set(key, value);
+  } else {
+    parsed.searchParams.delete(key);
+  }
+  return parsed.toString();
+}
+
+function arrayFrom(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+
+  for (const value of values) {
+    const item = normalizeWhitespace(String(value || ''));
+    if (!item || seen.has(item.toLowerCase())) continue;
+
+    seen.add(item.toLowerCase());
+    result.push(item);
+  }
+
+  return result;
+}
+
+function slugify(value) {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function errorMessage(error) {
+  return String(error?.message || error || 'Unknown error');
 }
 
 function stripHtml(input) {
