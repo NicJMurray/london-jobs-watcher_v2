@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "london-jobs-watcher",
+  "main": "src/index.js",
+  "compatibility_date": "2026-05-04",
+  "workers_dev": true,
+  "vars": {
+    "JOBS_URL": "https://example.com/jobs"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "JOBS_KV",
+      "id": "YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  }
+}
