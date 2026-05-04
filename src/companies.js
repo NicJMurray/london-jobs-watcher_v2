@@ -10,10 +10,10 @@ export const COMPANIES = [
   {
     name: 'Strava',
     slug: 'strava',
-    url: 'https://www.strava.com/careers',
-    parserType: 'html',
+    url: 'https://api.ashbyhq.com/posting-api/job-board/strava?includeCompensation=false',
+    parserType: 'ashby',
     enabled: true,
-    notes: 'HTML fallback.',
+    notes: 'Confirmed Ashby public job board API.',
   },
   {
     name: 'Google',
@@ -58,10 +58,10 @@ export const COMPANIES = [
   {
     name: 'Financial Times',
     slug: 'financial-times',
-    url: 'https://jobsearch.ft.com/jobs/search',
-    parserType: 'html',
-    enabled: false,
-    notes: 'Disabled in v1 because this host did not resolve in local Worker testing.',
+    url: 'https://boards-api.greenhouse.io/v1/boards/financialtimes33/jobs?content=true',
+    parserType: 'greenhouse',
+    enabled: true,
+    notes: 'Confirmed Greenhouse public job board API.',
   },
   {
     name: 'parkrun',
@@ -74,10 +74,10 @@ export const COMPANIES = [
   {
     name: 'London Marathon Events',
     slug: 'london-marathon-events',
-    url: 'https://www.londonmarathonevents.co.uk/about-us/careers',
+    url: 'https://londonmarathongr.careers.hibob.com/jobs',
     parserType: 'html',
-    enabled: false,
-    notes: 'Disabled in v1 because this URL currently returns 404 to fetch-based checks.',
+    enabled: true,
+    notes: 'HiBob careers page. No public jobs API found; HTML fallback currently only reports jobs if links are server-rendered.',
   },
   {
     name: 'Slack',
@@ -139,9 +139,9 @@ export const COMPANIES = [
     name: 'Vinted',
     slug: 'vinted',
     url: 'https://careers.vinted.com/jobs',
-    parserType: 'html',
+    parserType: 'next-greenhouse',
     enabled: true,
-    notes: 'HTML fallback.',
+    notes: 'Parses Greenhouse job payload embedded in the public Next.js page data.',
   },
   {
     name: 'Skyscanner',
@@ -194,18 +194,18 @@ export const COMPANIES = [
   {
     name: 'Adidas',
     slug: 'adidas',
-    url: 'https://careers.adidas-group.com/jobs?location=London',
+    url: 'https://jobs.adidas-group.com/search/?q=&locationsearch=London',
     parserType: 'html',
     enabled: true,
-    notes: 'HTML fallback.',
+    notes: 'HTML fallback for Adidas jobs search filtered to London.',
   },
   {
     name: 'Decathlon',
     slug: 'decathlon',
-    url: 'https://joinus.decathlon.co.uk/jobs',
+    url: 'https://jobs.decathlon.co.uk/go/View-all-Jobs/4978001/12/?q=&sortColumn=sort_location&sortDirection=asc',
     parserType: 'html',
-    enabled: false,
-    notes: 'Disabled in v1 because this host did not resolve in local Worker testing.',
+    enabled: true,
+    notes: 'HTML fallback for Decathlon UK jobs search.',
   },
   {
     name: 'Deloitte',
@@ -218,10 +218,10 @@ export const COMPANIES = [
   {
     name: 'Apple',
     slug: 'apple',
-    url: 'https://jobs.apple.com/en-gb/search?location=london-LND',
-    parserType: 'html',
-    enabled: false,
-    notes: 'Disabled in v1 because this page currently returns 403 to Worker fetches.',
+    url: 'https://jobs.apple.com/en-us/search?location=london-LND',
+    parserType: 'apple',
+    enabled: true,
+    notes: 'HTML parser for Apple London search results.',
   },
   {
     name: 'Meta',

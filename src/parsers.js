@@ -12,11 +12,66 @@ export async function fetchCompanyJobs(company) {
       return fetchLeverJobs(company);
     case 'ashby':
       return fetchAshbyJobs(company);
+    case 'apple':
+      return fetchAppleJobs(company);
+    case 'next-greenhouse':
+      return fetchNextGreenhouseJobs(company);
     case 'html':
       return fetchHtmlJobs(company);
     default:
       throw new Error(`Unsupported parser type: ${company.parserType}`);
   }
+}
+
+async function fetchNextGreenhouseJobs(company) {
+  const html = await fetchText(company.url);
+  const data = extractNextData(html);
+  const jobs = findGreenhouseJobArrays(data).flat();
+
+  return jobs.map((job) => {
+    const offices = collectNames(job.offices);
+    const location = normalizeWhitespace(job.location?.name || '');
+    const office = normalizeWhitespace(offices.join(', '));
+
+    return normalizeJob(company, {
+      id: job.id || job.internal_job_id || job.absolute_url,
+      title: job.title,
+      location,
+      office,
+      url: job.absolute_url,
+      postedAt: job.first_published || job.updated_at,
+      searchText: [job.title, location, office].join(' '),
+    });
+  });
+}
+
+async function fetchAppleJobs(company) {
+  const html = await fetchText(company.url);
+  const itemRegex = /<div id="search-search-job-title-PIPE-([^"]+)"[\s\S]*?<h3>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h3>[\s\S]*?<span class="job-posted-date"[^>]*>([\s\S]*?)<\/span>[\s\S]*?<span class="table--advanced-search__location-sub"[^>]*>([\s\S]*?)<\/span>/gi;
+  const jobs = [];
+  let match;
+
+  while ((match = itemRegex.exec(html)) !== null) {
+    const id = normalizeWhitespace(match[1]);
+    const url = canonicalUrl(match[2], company.url);
+    const title = stripHtml(match[3]);
+    const postedAt = normalizeAppleDate(stripHtml(match[4]));
+    const location = stripHtml(match[5]);
+
+    jobs.push(
+      normalizeJob(company, {
+        id: id || url,
+        title,
+        location,
+        office: location,
+        url,
+        postedAt,
+        searchText: [title, location].join(' '),
+      }),
+    );
+  }
+
+  return jobs;
 }
 
 export function isLondonJob(job) {
@@ -162,6 +217,52 @@ function extractLinks(html, baseUrl) {
   return links;
 }
 
+function extractNextData(html) {
+  const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!match) return null;
+
+  try {
+    return JSON.parse(decodeHtml(match[1]));
+  } catch {
+    return null;
+  }
+}
+
+function findGreenhouseJobArrays(value) {
+  const found = [];
+  const seen = new Set();
+
+  function visit(item) {
+    if (!item || typeof item !== 'object' || seen.has(item)) return;
+    seen.add(item);
+
+    if (Array.isArray(item)) {
+      if (item.some(isGreenhouseJobShape)) {
+        found.push(item.filter(isGreenhouseJobShape));
+      }
+      for (const child of item) visit(child);
+      return;
+    }
+
+    for (const child of Object.values(item)) {
+      visit(child);
+    }
+  }
+
+  visit(value);
+  return found;
+}
+
+function isGreenhouseJobShape(value) {
+  return Boolean(
+    value
+      && typeof value === 'object'
+      && value.absolute_url
+      && value.title
+      && (value.id || value.internal_job_id),
+  );
+}
+
 function isProbablyJobLink(link) {
   const blockedUtilityLink = /(?:privacy|cookie|terms|accessibility|locale=|\/content\/|\/blog\/|\/press\/|\/events?\/)/i.test(
     link.url,
@@ -301,6 +402,12 @@ function normalizeLeverTimestamp(value) {
   if (!value) return '';
   if (typeof value === 'number') return normalizeDate(new Date(value).toISOString());
   return normalizeDate(value);
+}
+
+function normalizeAppleDate(value) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return '';
+  return normalizeDate(`${normalized} 00:00:00 GMT`);
 }
 
 function normalizeDate(value) {

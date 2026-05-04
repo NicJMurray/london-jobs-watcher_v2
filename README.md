@@ -1,10 +1,10 @@
 # london-jobs-watcher
 
-A Cloudflare Worker that runs every 6 hours, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends only newly discovered London jobs to Telegram.
+A Cloudflare Worker that runs hourly, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs or a no-new-listings status.
 
 ## What It Does
 
-- Runs on a Cloudflare Workers cron schedule: `0 */6 * * *`
+- Runs on a Cloudflare Workers cron schedule: `0 * * * *`
 - Checks companies listed in [src/companies.js](src/companies.js)
 - Supports Greenhouse, Lever, Ashby, and a basic fetch-based HTML fallback
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
@@ -114,13 +114,13 @@ Send a Telegram test message:
 curl http://localhost:8787/test-telegram
 ```
 
-Send one current/latest parsed job per enabled company as a Telegram test digest:
+Send one current/latest parsed London job per enabled company as a Telegram test digest:
 
 ```bash
 curl http://localhost:8787/test-latest-jobs
 ```
 
-Run the watcher manually and send Telegram only if new London jobs are found:
+Run the watcher manually and send a Telegram update:
 
 ```bash
 curl http://localhost:8787/run-now
@@ -148,7 +148,7 @@ After replacing the KV namespace IDs in [wrangler.jsonc](wrangler.jsonc):
 npm run deploy
 ```
 
-The deployed Worker will run every 6 hours from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
+The deployed Worker will run hourly from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
 
 ## GitHub Actions Deploy
 
@@ -172,8 +172,8 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 
 - `GET /health` returns `OK`
 - `GET or POST /test-telegram` sends a Telegram test message
-- `GET or POST /test-latest-jobs` sends one current/latest parsed job per enabled company without changing KV
-- `GET or POST /run-now` checks companies immediately and sends a Telegram alert only if new London jobs are found
+- `GET or POST /test-latest-jobs` sends one current/latest parsed London job per enabled company without changing KV
+- `GET or POST /run-now` checks companies immediately and sends a Telegram update, including a no-new-listings message when there are no new London jobs
 - `GET /run-now?notify=false` checks companies without sending Telegram
 - `GET /debug-seen` shows the current KV dedupe count and recent seen jobs
 

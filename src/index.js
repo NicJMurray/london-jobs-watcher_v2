@@ -148,7 +148,7 @@ async function runWatcher(env, options = {}) {
     return byCompany || a.title.localeCompare(b.title);
   });
 
-  const shouldNotify = options.notify !== false && run.newLondonJobs.length > 0;
+  const shouldNotify = options.notify !== false;
 
   if (shouldNotify) {
     run.notification.attempted = true;
@@ -170,9 +170,7 @@ async function runWatcher(env, options = {}) {
   }
 
   run.finishedAt = new Date().toISOString();
-  console.log(
-    `Run finished: ${run.newLondonJobs.length} new London jobs, ${run.failures.length} failures`,
-  );
+  console.log(`Run finished: ${run.newLondonJobs.length} new London jobs, ${run.failures.length} failures`);
 
   return run;
 }
@@ -197,7 +195,8 @@ async function runLatestJobsTest(env, options = {}) {
       continue;
     }
 
-    const latestJob = pickLatestJob(companyResult.jobs);
+    const londonJobs = companyResult.jobs.filter(isLondonJob);
+    const latestJob = pickLatestJob(londonJobs);
     if (!latestJob) {
       noJobs.push(companyResult.company);
       continue;
@@ -209,7 +208,6 @@ async function runLatestJobsTest(env, options = {}) {
       location: latestJob.location || latestJob.office || 'Location not listed',
       url: latestJob.url,
       postedAt: latestJob.postedAt || '',
-      londonMatch: isLondonJob(latestJob),
     });
   }
 
@@ -347,19 +345,21 @@ async function sendTelegramMessage(env, text) {
 
 function formatTelegramRunMessage(run) {
   const count = run.newLondonJobs.length;
-  const lines = [`${count} new London jobs found`, ''];
+  const lines = [count > 0 ? `${count} new London jobs found` : 'No new London listings found', ''];
   let omitted = 0;
 
-  for (const job of run.newLondonJobs) {
-    const block = `${job.company} — ${job.title}\n${job.location}\n${job.url}`;
-    const candidate = [...lines, block, ''].join('\n');
+  if (count > 0) {
+    for (const job of run.newLondonJobs) {
+      const block = `${job.company} — ${job.title}\n${job.location}\n${job.url}`;
+      const candidate = [...lines, block, ''].join('\n');
 
-    if (candidate.length > MAX_TELEGRAM_MESSAGE_LENGTH) {
-      omitted += 1;
-      continue;
+      if (candidate.length > MAX_TELEGRAM_MESSAGE_LENGTH) {
+        omitted += 1;
+        continue;
+      }
+
+      lines.push(block, '');
     }
-
-    lines.push(block, '');
   }
 
   if (omitted > 0) {
@@ -387,13 +387,12 @@ function formatLatestJobsTestMessages(result) {
       lines.push(`Posted: ${formatDateForMessage(job.postedAt)}`);
     }
 
-    lines.push(`London match: ${job.londonMatch ? 'yes' : 'no'}`);
     lines.push(job.url);
     return lines.join('\n');
   });
 
   if (result.noJobs.length > 0) {
-    blocks.push(`No parsed jobs: ${result.noJobs.join(', ')}`);
+    blocks.push(`No parsed London jobs: ${result.noJobs.join(', ')}`);
   }
 
   if (result.failures.length > 0) {
@@ -402,7 +401,7 @@ function formatLatestJobsTestMessages(result) {
 
   const summaryLines = [
     'Latest job listing test',
-    `${result.latestJobs.length} companies with parsed jobs`,
+    `${result.latestJobs.length} companies with parsed London jobs`,
     `${result.checkedCompanies} checked, ${result.disabledCompanies} disabled skipped`,
   ];
 
