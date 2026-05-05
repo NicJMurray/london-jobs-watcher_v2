@@ -151,13 +151,16 @@ async function runWatcher(env, options = {}) {
   const shouldNotify = options.notify !== false;
 
   if (shouldNotify) {
-    run.notification.attempted = true;
-    try {
-      await sendTelegramMessage(env, formatTelegramRunMessage(run));
-      run.notification.sent = true;
-    } catch (error) {
-      run.notification.error = errorMessage(error);
-      console.error('Telegram notification failed', error);
+    const message = formatTelegramRunMessage(run);
+    if (message) {
+      run.notification.attempted = true;
+      try {
+        await sendTelegramMessage(env, message);
+        run.notification.sent = true;
+      } catch (error) {
+        run.notification.error = errorMessage(error);
+        console.error('Telegram notification failed', error);
+      }
     }
   }
 
@@ -345,7 +348,9 @@ async function sendTelegramMessage(env, text) {
 
 function formatTelegramRunMessage(run) {
   const count = run.newLondonJobs.length;
-  const lines = [count > 0 ? `${count} new London jobs found` : 'No new London listings found', ''];
+  if (count === 0 && run.failures.length === 0) return '';
+
+  const lines = count > 0 ? [`${count} new London jobs found`, ''] : [];
   let omitted = 0;
 
   if (count > 0) {

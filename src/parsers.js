@@ -1,5 +1,6 @@
 const REQUEST_TIMEOUT_MS = 45000;
 const HTML_CONTEXT_CHARS = 500;
+const BROWSER_USER_AGENT = 'Mozilla/5.0 (compatible; london-jobs-watcher/1.0; +https://workers.cloudflare.com/)';
 
 const LONDON_PATTERN = /\b(?:Greater\s+London|London|Hybrid\s+London)\b/i;
 const NON_UK_LONDON_PATTERN = /\bLondon\s*,?\s*(?:ON|Ontario|Canada)\b/i;
@@ -24,6 +25,10 @@ export async function fetchCompanyJobs(company) {
       return fetchJibeJobs(company);
     case 'eightfold-embedded':
       return fetchEightfoldEmbeddedJobs(company);
+    case 'eightfold-pcsx':
+      return fetchEightfoldPcsxJobs(company);
+    case 'meta-graphql':
+      return fetchMetaGraphqlJobs(company);
     case 'next-greenhouse':
       return fetchNextGreenhouseJobs(company);
     case 'html':
@@ -36,11 +41,17 @@ export async function fetchCompanyJobs(company) {
 async function fetchNextGreenhouseJobs(company) {
   const html = await fetchText(company.url);
   const data = extractNextData(html);
-  const jobs = findGreenhouseJobArrays(data).flat();
+  const configuredJobs = company.greenhouseDataMapKey
+    ? data?.props?.pageProps?.jobs?.dataMap?.[company.greenhouseDataMapKey]?.jobs
+    : null;
+  const jobs = dedupeRawJobs(
+    Array.isArray(configuredJobs) ? configuredJobs : findGreenhouseJobArrays(data).flat(),
+  );
 
   return jobs.map((job) => {
     const offices = collectNames(job.offices);
-    const location = normalizeWhitespace(job.location?.name || '');
+    const cityCountry = normalizeWhitespace([job.city?.name, job.country?.name].filter(Boolean).join(', '));
+    const location = normalizeWhitespace(job.location?.name || cityCountry || collectLocations(job.offices).join(', '));
     const office = normalizeWhitespace(offices.join(', '));
 
     return normalizeJob(company, {
@@ -50,7 +61,7 @@ async function fetchNextGreenhouseJobs(company) {
       office,
       url: job.absolute_url,
       postedAt: job.first_published || job.updated_at,
-      searchText: [job.title, location, office].join(' '),
+      searchText: [job.title, location, office, metadataValues(job.metadata).join(', ')].join(' '),
     });
   });
 }
@@ -270,7 +281,7 @@ async function fetchWorkableJobs(company) {
 async function fetchJibeJobs(company) {
   const jobs = [];
   const seenIds = new Set();
-  const limit = company.limit || 100;
+  const pageSize = company.pageSize || company.limit || 10;
   const maxPages = company.maxPages || 5;
 
   for (let page = 1; page <= maxPages; page += 1) {
@@ -289,7 +300,7 @@ async function fetchJibeJobs(company) {
       jobs.push(mapJibeJob(company, job));
     }
 
-    if (Number(data?.totalCount || 0) <= seenIds.size || pageJobs.length < limit) break;
+    if (Number(data?.totalCount || 0) <= seenIds.size || pageJobs.length < pageSize) break;
   }
 
   return jobs;
@@ -331,6 +342,89 @@ async function fetchEightfoldEmbeddedJobs(company) {
   });
 }
 
+async function fetchEightfoldPcsxJobs(company) {
+  const jobs = [];
+  const seenIds = new Set();
+  const domain = company.domain || new URL(company.careersUrl || company.url).hostname;
+  const query = company.query || '';
+  const location = company.locationQuery || '';
+  const pageSize = company.pageSize || 10;
+  const maxPages = company.maxPages || 10;
+  let totalCount = 0;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const url = new URL(company.url);
+    url.searchParams.set('domain', domain);
+    url.searchParams.set('query', query);
+    url.searchParams.set('location', location);
+    url.searchParams.set('start', String(page * pageSize));
+    if (company.sortBy) url.searchParams.set('sort_by', company.sortBy);
+
+    const data = await fetchJson(url.toString());
+    const pageJobs = Array.isArray(data?.data?.positions) ? data.data.positions : [];
+    totalCount = Number(data?.data?.count || totalCount || 0);
+
+    if (!pageJobs.length) break;
+
+    for (const job of pageJobs) {
+      const id = normalizeWhitespace(String(job.displayJobId || job.atsJobId || job.id || job.positionUrl || ''));
+      if (!id || seenIds.has(id)) continue;
+
+      seenIds.add(id);
+      jobs.push(mapEightfoldPcsxJob(company, job));
+    }
+
+    if (totalCount > 0 && seenIds.size >= totalCount) break;
+    if (pageJobs.length < pageSize) break;
+  }
+
+  return jobs;
+}
+
+async function fetchMetaGraphqlJobs(company) {
+  const page = await fetchTextWithHeaders(company.url, { headers: browserHeaders('text/html,*/*;q=0.8') });
+  const html = page.text;
+  const metaConfig = extractMetaGraphqlConfig(html);
+  metaConfig.cookie = cookieHeaderFromSetCookie(page.headers);
+  const offices = company.offices || ['London, UK'];
+  const variables = {
+    search_input: {
+      q: company.query || null,
+      divisions: [],
+      offices,
+      roles: [],
+      leadership_levels: [],
+      saved_jobs: [],
+      saved_searches: [],
+      sub_teams: [],
+      teams: [],
+      is_leadership: false,
+      is_remote_only: false,
+      sort_by_new: Boolean(company.sortByNew),
+      results_per_page: null,
+    },
+  };
+  const data = await postMetaGraphql(company, metaConfig, variables);
+  const jobs = Array.isArray(data?.data?.job_search_with_featured_jobs?.all_jobs)
+    ? data.data.job_search_with_featured_jobs.all_jobs
+    : [];
+
+  return jobs.map((job) => {
+    const location = normalizeWhitespace(uniqueStrings(arrayFrom(job.locations)).join('; '));
+    const categories = uniqueStrings([...arrayFrom(job.teams), ...arrayFrom(job.sub_teams)]).join(', ');
+
+    return normalizeJob(company, {
+      id: job.id,
+      title: job.title,
+      location,
+      office: location,
+      url: canonicalUrl(`/jobs/${job.id}/`, company.url),
+      postedAt: '',
+      searchText: [job.title, location, categories].join(' '),
+    });
+  });
+}
+
 function mapSuccessFactorsJob(company, job, locale) {
   const title = stripHtml(job.unifiedStandardTitle || job.title || job.jobTitle);
   const location = normalizeWhitespace(
@@ -354,6 +448,118 @@ function mapSuccessFactorsJob(company, job, locale) {
     postedAt: normalizeSuccessFactorsDate(job.unifiedStandardStart || job.postedDate),
     searchText: [title, location, department].join(' '),
   });
+}
+
+function mapEightfoldPcsxJob(company, job) {
+  const title = stripHtml(job.name || job.title);
+  const location = normalizeWhitespace(
+    uniqueStrings([...arrayFrom(job.locations), ...arrayFrom(job.standardizedLocations)]).join('; '),
+  );
+  const department = normalizeWhitespace(
+    [job.department, job.workLocationOption, job.locationFlexibility].filter(Boolean).join(', '),
+  );
+  const url = canonicalUrl(job.positionUrl || `/careers/job/${job.id}`, company.careersUrl || company.url);
+
+  return normalizeJob(company, {
+    id: job.displayJobId || job.atsJobId || job.id || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: normalizeUnixTimestamp(job.postedTs || job.creationTs),
+    searchText: [title, location, department].join(' '),
+  });
+}
+
+async function postMetaGraphql(company, metaConfig, variables) {
+  const body = new URLSearchParams({
+    av: '0',
+    __user: '0',
+    __a: '1',
+    __req: '1',
+    __hs: metaConfig.hasteSession,
+    dpr: '1',
+    __ccg: 'EXCELLENT',
+    __rev: metaConfig.clientRevision,
+    __s: 'x',
+    __hsi: metaConfig.hsi,
+    __comet_req: '31',
+    lsd: metaConfig.lsd,
+    jazoest: metaConfig.jazoest,
+    __spin_r: metaConfig.clientRevision,
+    __spin_b: 'trunk',
+    __spin_t: metaConfig.spinT,
+    fb_api_caller_class: 'RelayModern',
+    fb_api_req_friendly_name: company.graphqlFriendlyName || 'CareersJobSearchResultsDataQuery',
+    variables: JSON.stringify(variables),
+    server_timestamps: 'true',
+    doc_id: company.graphqlDocId,
+  });
+
+  const response = await fetchWithTimeout(company.graphqlUrl || 'https://www.metacareers.com/api/graphql/', {
+    method: 'POST',
+    headers: {
+      accept: '*/*',
+      'content-type': 'application/x-www-form-urlencoded',
+      'user-agent': BROWSER_USER_AGENT,
+      origin: 'https://www.metacareers.com',
+      referer: company.url,
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'same-origin',
+      'x-asbd-id': '359341',
+      'x-fb-friendly-name': company.graphqlFriendlyName || 'CareersJobSearchResultsDataQuery',
+      'x-fb-lsd': metaConfig.lsd,
+      ...(metaConfig.cookie ? { cookie: metaConfig.cookie } : {}),
+    },
+    body,
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
+  }
+
+  try {
+    return JSON.parse(text.replace(/^for \(;;\);/, ''));
+  } catch {
+    throw new Error(`Expected Meta GraphQL JSON but received: ${text.slice(0, 160)}`);
+  }
+}
+
+function extractMetaGraphqlConfig(html) {
+  const lsd = matchFirst(html, [
+    /\["LSD",\[\],\{"token":"([^"]+)"/,
+    /"LSD",\[\],\{"token":"([^"]+)"/,
+  ]);
+  const clientRevision = matchFirst(html, [/"client_revision":(\d+)/]);
+  const hsi = matchFirst(html, [/"hsi":"(\d+)"/]);
+  const hasteSession = matchFirst(html, [/"haste_session":"([^"]+)"/]);
+  const spinT = matchFirst(html, [/"__spin_t":(\d+)/]) || String(Math.floor(Date.now() / 1000));
+
+  if (!lsd || !clientRevision || !hsi) {
+    throw new Error('Could not extract Meta GraphQL boot tokens');
+  }
+
+  return {
+    lsd,
+    clientRevision,
+    hsi,
+    hasteSession,
+    spinT,
+    jazoest: jazoestFromToken(lsd),
+  };
+}
+
+function matchFirst(text, patterns) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return '';
+}
+
+function jazoestFromToken(token) {
+  return `2${[...String(token)].map((char) => char.charCodeAt(0)).join('')}`;
 }
 
 function extractCodeJson(html, ids) {
@@ -400,7 +606,7 @@ function mapJibeJob(company, job) {
     ...arrayFrom(job.tags3),
     job.employment_type,
   ];
-  const url = job.apply_url || canonicalUrl(`/jobs/${job.slug || job.req_id}`, company.url);
+  const url = job.meta_data?.canonical_url || job.canonical_url || job.apply_url || canonicalUrl(`/jobs/${job.slug || job.req_id}`, company.url);
 
   return normalizeJob(company, {
     id: job.req_id || job.slug || url,
@@ -706,8 +912,17 @@ async function postJson(url, body) {
 }
 
 async function fetchText(url) {
+  const { text } = await fetchTextWithHeaders(url);
+  return text;
+}
+
+async function fetchTextWithHeaders(url, init = {}) {
   const response = await fetchWithTimeout(url, {
-    headers: { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+    ...init,
+    headers: {
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      ...init.headers,
+    },
   });
 
   const text = await response.text();
@@ -715,7 +930,7 @@ async function fetchText(url) {
     throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
   }
 
-  return text;
+  return { text, headers: response.headers };
 }
 
 async function fetchWithTimeout(url, init = {}) {
@@ -800,9 +1015,70 @@ function collectNames(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value.flatMap((item) => collectNames(item));
   if (typeof value === 'object') {
-    return [value.name, value.location?.name].filter(Boolean).map((item) => normalizeWhitespace(String(item)));
+    return [value.name, typeof value.location === 'string' ? value.location : value.location?.name]
+      .filter(Boolean)
+      .map((item) => normalizeWhitespace(String(item)));
   }
   return [normalizeWhitespace(String(value))];
+}
+
+function browserHeaders(accept) {
+  return {
+    accept,
+    'accept-language': 'en-GB,en;q=0.9',
+    'user-agent': BROWSER_USER_AGENT,
+  };
+}
+
+function cookieHeaderFromSetCookie(headers) {
+  const setCookies = typeof headers.getSetCookie === 'function'
+    ? headers.getSetCookie()
+    : [headers.get('set-cookie')].filter(Boolean);
+
+  return setCookies
+    .flatMap((value) => String(value).split(/,(?=\s*[^;,=\s]+=[^;,]+)/))
+    .map((value) => value.split(';')[0].trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+function collectLocations(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectLocations(item));
+  if (typeof value === 'object') {
+    return [
+      typeof value.location === 'string' ? value.location : value.location?.name,
+      [value.city?.name || value.city, value.country?.name || value.country].filter(Boolean).join(', '),
+    ]
+      .filter(Boolean)
+      .map((item) => normalizeWhitespace(String(item)));
+  }
+  return [normalizeWhitespace(String(value))];
+}
+
+function metadataValues(value) {
+  return arrayFrom(value)
+    .map((item) => {
+      if (!item || typeof item !== 'object') return '';
+      return item.value;
+    })
+    .filter(Boolean)
+    .map((item) => normalizeWhitespace(String(item)));
+}
+
+function dedupeRawJobs(jobs) {
+  const seen = new Set();
+  const result = [];
+
+  for (const job of jobs) {
+    const key = normalizeWhitespace(String(job?.id || job?.internal_job_id || job?.absolute_url || ''));
+    if (!key || seen.has(key)) continue;
+
+    seen.add(key);
+    result.push(job);
+  }
+
+  return result;
 }
 
 function canonicalUrl(input, baseUrl) {

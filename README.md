@@ -235,6 +235,8 @@ Supported `parserType` values:
 - `workable` for Workable-style job listing feeds, currently used for Starling Bank
 - `jibe` for Jibe/iCIMS careers search APIs, currently used for Garmin
 - `eightfold-embedded` for Eightfold pages that embed job data in server-rendered HTML, currently used for Netflix
+- `eightfold-pcsx` for Eightfold PCSX search APIs, currently used for Microsoft
+- `meta-graphql` for Meta's public careers Relay search endpoint
 - `apple` for Apple's paginated jobs search data
 - `next-greenhouse` for sites that embed Greenhouse jobs in Next.js page data
 - `html` for basic fetch-based link parsing
