@@ -10,7 +10,7 @@ A Cloudflare Worker that runs hourly, checks configured company careers pages/AP
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
 - Sends one Telegram message only when new London jobs are discovered
 - Records older first-seen jobs quietly when the source exposes a posted date older than 14 days
-- Keeps going if one company fails and includes a warning in Telegram when new jobs are found
+- Keeps going if one company fails and includes failure warnings only when new jobs are found, or when every enabled company fails
 
 ## Requirements
 
@@ -174,7 +174,7 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 - `GET /health` returns `OK`
 - `GET or POST /test-telegram` sends a Telegram test message
 - `GET or POST /test-latest-jobs` sends one latest parsed London job per enabled company without changing KV
-- `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found or a company fails
+- `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found, or when every enabled company fails
 - `GET /run-now?notify=false` checks companies without sending Telegram
 - `GET /debug-seen` shows the current KV dedupe count and recent seen jobs
 

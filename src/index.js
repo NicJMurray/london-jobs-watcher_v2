@@ -396,9 +396,13 @@ async function sendTelegramMessage(env, text) {
 
 function formatTelegramRunMessage(run) {
   const count = run.newLondonJobs.length;
-  if (count === 0 && run.failures.length === 0) return '';
+  const allCompaniesFailed = run.checkedCompanies > 0 && run.failures.length >= run.checkedCompanies;
 
-  const lines = count > 0 ? [`${count} new London jobs found`, ''] : [];
+  if (count === 0 && !allCompaniesFailed) return '';
+
+  const lines = count > 0
+    ? [`${count} new London jobs found`, '']
+    : [`All ${run.checkedCompanies} enabled company checks failed`, ''];
   let omitted = 0;
 
   if (count > 0) {
@@ -421,9 +425,10 @@ function formatTelegramRunMessage(run) {
 
   if (run.failures.length > 0) {
     const failedCompanies = run.failures.map((failure) => failure.company);
-    lines.push(
-      `Warning: ${run.failures.length} compan${run.failures.length === 1 ? 'y' : 'ies'} failed: ${failedCompanies.join(', ')}`,
-    );
+    const prefix = allCompaniesFailed && count === 0
+      ? 'Failed companies'
+      : `Warning: ${run.failures.length} compan${run.failures.length === 1 ? 'y' : 'ies'} failed`;
+    lines.push(`${prefix}: ${failedCompanies.join(', ')}`);
   }
 
   return lines.join('\n').trim();
