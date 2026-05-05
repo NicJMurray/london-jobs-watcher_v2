@@ -1,10 +1,12 @@
 import { COMPANIES } from './companies.js';
-import { fetchCompanyJobs, isLondonJob } from './parsers.js';
+import { fetchCompanyJobs, isLondonJob, verifyJobIsOpenForAlert } from './parsers.js';
 
 const SEEN_KV_KEY = 'seen-jobs-v1';
 const MAX_DEBUG_JOBS = 100;
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3900;
 const COMPANY_FETCH_CONCURRENCY = 6;
+const MAX_ALERT_JOB_AGE_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export default {
   async fetch(request, env) {
@@ -87,6 +89,7 @@ async function runWatcher(env, options = {}) {
     totalJobsFound: 0,
     londonJobsFound: 0,
     firstSeenJobs: 0,
+    skippedLondonAlerts: [],
     newLondonJobs: [],
     failures: [],
     notification: {
@@ -130,9 +133,24 @@ async function runWatcher(env, options = {}) {
         title: job.title,
         location: job.location || job.office || '',
         url: job.url,
+        postedAt: job.postedAt || '',
+        closingAt: job.closingAt || '',
       };
 
       if (londonJob) {
+        const alertDecision = await shouldAlertNewLondonJob(job, startedAt);
+
+        if (!alertDecision.alert) {
+          run.skippedLondonAlerts.push({
+            company: job.company,
+            title: job.title,
+            location: job.location || job.office || 'Location not listed',
+            url: job.url,
+            reason: alertDecision.reason,
+          });
+          continue;
+        }
+
         run.newLondonJobs.push({
           company: job.company,
           title: job.title,
@@ -164,7 +182,9 @@ async function runWatcher(env, options = {}) {
     }
   }
 
-  if (seenStoreChanged && (!shouldNotify || run.notification.sent)) {
+  const notificationFailed = run.notification.attempted && !run.notification.sent && run.notification.error;
+
+  if (seenStoreChanged && !notificationFailed) {
     await saveSeenStore(env, {
       version: 1,
       updatedAt: new Date().toISOString(),
@@ -176,6 +196,34 @@ async function runWatcher(env, options = {}) {
   console.log(`Run finished: ${run.newLondonJobs.length} new London jobs, ${run.failures.length} failures`);
 
   return run;
+}
+
+async function shouldAlertNewLondonJob(job, runStartedAt) {
+  const staleReason = staleAlertReason(job, runStartedAt);
+  if (staleReason) return { alert: false, reason: staleReason };
+
+  try {
+    const openCheck = await verifyJobIsOpenForAlert(job, runStartedAt);
+    if (!openCheck.open) {
+      return { alert: false, reason: openCheck.reason || 'job appears closed' };
+    }
+  } catch (error) {
+    console.warn(`Could not verify job is open for alert: ${job.key}`, error);
+  }
+
+  return { alert: true, reason: '' };
+}
+
+function staleAlertReason(job, runStartedAt) {
+  if (!job.postedAt) return '';
+
+  const postedAt = new Date(job.postedAt);
+  if (Number.isNaN(postedAt.getTime())) return '';
+
+  const cutoff = new Date(runStartedAt.getTime() - MAX_ALERT_JOB_AGE_DAYS * DAY_MS);
+  if (postedAt >= cutoff) return '';
+
+  return `posted more than ${MAX_ALERT_JOB_AGE_DAYS} days ago (${postedAt.toISOString().slice(0, 10)})`;
 }
 
 async function runLatestJobsTest(env, options = {}) {
@@ -449,6 +497,8 @@ function summarizeRun(run) {
     totalJobsFound: run.totalJobsFound,
     londonJobsFound: run.londonJobsFound,
     firstSeenJobs: run.firstSeenJobs,
+    skippedLondonAlertsCount: run.skippedLondonAlerts.length,
+    skippedLondonAlerts: run.skippedLondonAlerts.slice(0, 25),
     newLondonJobsCount: run.newLondonJobs.length,
     newLondonJobs: run.newLondonJobs,
     failures: run.failures,

@@ -1,9 +1,24 @@
 const REQUEST_TIMEOUT_MS = 45000;
 const HTML_CONTEXT_CHARS = 500;
 const BROWSER_USER_AGENT = 'Mozilla/5.0 (compatible; london-jobs-watcher/1.0; +https://workers.cloudflare.com/)';
+const REAL_BROWSER_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const LONDON_PATTERN = /\b(?:Greater\s+London|London|Hybrid\s+London)\b/i;
 const NON_UK_LONDON_PATTERN = /\bLondon\s*,?\s*(?:ON|Ontario|Canada)\b/i;
+const MONTH_INDEX = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11,
+};
 
 export async function fetchCompanyJobs(company) {
   switch (company.parserType) {
@@ -21,6 +36,14 @@ export async function fetchCompanyJobs(company) {
       return fetchSuccessFactorsJobs(company);
     case 'workable':
       return fetchWorkableJobs(company);
+    case 'workday':
+      return fetchWorkdayJobs(company);
+    case 'icims':
+      return fetchIcimsJobs(company);
+    case 'paradox':
+      return fetchParadoxJobs(company);
+    case 'revolut-next':
+      return fetchRevolutNextJobs(company);
     case 'jibe':
       return fetchJibeJobs(company);
     case 'eightfold-embedded':
@@ -278,6 +301,156 @@ async function fetchWorkableJobs(company) {
   });
 }
 
+async function fetchWorkdayJobs(company) {
+  const jobs = [];
+  const seenIds = new Set();
+  const pageSize = company.pageSize || company.limit || 20;
+  const maxPages = company.maxPages || 5;
+  const searchText = company.searchText || company.locationQuery || '';
+  const appliedFacets = { ...(company.appliedFacets || {}) };
+  const searches = Array.isArray(company.searches) && company.searches.length > 0
+    ? company.searches
+    : [{ searchText, appliedFacets, maxPages }];
+
+  for (const search of searches) {
+    const searchMaxPages = search.maxPages || maxPages;
+    const searchAppliedFacets = { ...(search.appliedFacets || appliedFacets) };
+    const query = search.searchText ?? searchText;
+
+    for (let page = 0; page < searchMaxPages; page += 1) {
+      const data = await postJson(company.url, {
+        appliedFacets: searchAppliedFacets,
+        limit: pageSize,
+        offset: page * pageSize,
+        searchText: query,
+      });
+      const pageJobs = Array.isArray(data?.jobPostings) ? data.jobPostings : [];
+
+      if (!pageJobs.length) break;
+
+      for (const job of pageJobs) {
+        const id = normalizeWhitespace(String(workdayJobId(job) || ''));
+        if (!id || seenIds.has(id)) continue;
+
+        seenIds.add(id);
+        jobs.push(mapWorkdayJob(company, job, search.locationHint));
+      }
+
+      if (Number(data?.total || 0) <= (page + 1) * pageSize || pageJobs.length < pageSize) break;
+    }
+  }
+
+  return jobs;
+}
+
+async function fetchIcimsJobs(company) {
+  const html = await fetchText(company.url);
+  const itemRegex = /<li\b[^>]*class="[^"]*\biCIMS_JobCardItem\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+  const jobs = [];
+  let match;
+
+  while ((match = itemRegex.exec(html)) !== null) {
+    const block = match[1];
+    const link = block.match(/<a\b[^>]*href="([^"]+)"[^>]*class="[^"]*\biCIMS_Anchor\b[^"]*"[^>]*title="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!link) continue;
+
+    const url = cleanIcimsUrl(canonicalUrl(decodeHtml(link[1]), company.url));
+    const title = stripHtml(link[3]).replace(/^Job Posting Title\s*/i, '') || titleFromUrl(url);
+    const location = extractIcimsField(block, 'Job Locations');
+    const id = extractIcimsField(block, 'ID') || matchFirst(url, [/\/jobs\/(\d+)\//]) || url;
+    const postedAt = normalizeIcimsDate(matchFirst(block, [/<span\b[^>]*title="([^"]+)"[^>]*>\s*[^<]*<span class="sr-only">/i]));
+
+    jobs.push(
+      normalizeJob(company, {
+        id,
+        title,
+        location,
+        office: location,
+        url,
+        postedAt,
+        searchText: [title, location, stripHtml(block)].join(' '),
+      }),
+    );
+  }
+
+  return jobs;
+}
+
+async function fetchParadoxJobs(company) {
+  const entryUrl = company.careersUrl || new URL(company.url).origin;
+  const page = await fetchTextWithRetry(entryUrl, {
+    headers: browserHeaders('text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', REAL_BROWSER_USER_AGENT),
+  });
+  const cookie = cookieHeaderFromSetCookie(page.headers);
+  const jobs = [];
+  const seenIds = new Set();
+  const pageSize = company.pageSize || 20;
+  const maxPages = company.maxPages || 5;
+
+  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
+    const url = new URL(company.url);
+    if (company.keyword) url.searchParams.set('keyword', company.keyword);
+    if (company.locationQuery) url.searchParams.set('location_name', company.locationQuery);
+    if (company.locationType) url.searchParams.set('location_type', company.locationType);
+    if (company.radius != null) url.searchParams.set('radius', String(company.radius));
+    url.searchParams.set('page_size', String(pageSize));
+    url.searchParams.set('page_number', String(pageNumber));
+
+    const data = await postJsonWithRetry(
+      url.toString(),
+      {
+        disable_switch_search_mode: Boolean(company.disableSwitchSearchMode),
+        site_available_languages: company.siteAvailableLanguages || ['en'],
+      },
+      {
+        ...browserHeaders('application/json, text/plain, */*', REAL_BROWSER_USER_AGENT),
+        'content-type': 'application/json',
+        origin: new URL(entryUrl).origin,
+        referer: entryUrl,
+        ...(cookie ? { cookie } : {}),
+      },
+    );
+    const pageJobs = Array.isArray(data?.jobs) ? data.jobs : [];
+
+    if (!pageJobs.length) break;
+
+    for (const job of pageJobs) {
+      const id = normalizeWhitespace(String(job.requisitionID || job.reference || job.uniqueID || job.sourceID || job.originalURL || ''));
+      if (!id || seenIds.has(id)) continue;
+
+      seenIds.add(id);
+      jobs.push(mapParadoxJob(company, job));
+    }
+
+    if (Number(data?.totalJob || 0) <= seenIds.size || pageJobs.length < pageSize) break;
+  }
+
+  return jobs;
+}
+
+async function fetchRevolutNextJobs(company) {
+  const html = await fetchReaderHtml(company.url);
+  const data = extractNextData(html);
+  const positions = Array.isArray(data?.props?.pageProps?.positions) ? data.props.pageProps.positions : [];
+
+  return positions.map((position) => {
+    const title = stripHtml(position.text);
+    const locations = arrayFrom(position.locations).map(revolutLocation).filter(Boolean);
+    const location = normalizeWhitespace(uniqueStrings(locations).join('; '));
+    const url = canonicalUrl(`/careers/position/${slugify(title)}-${position.id}/`, company.careersUrl || 'https://www.revolut.com');
+
+    return normalizeJob(company, {
+      id: position.id || url,
+      title,
+      location,
+      office: location,
+      url,
+      postedAt: '',
+      searchText: [title, location, position.team].join(' '),
+    });
+  });
+}
+
 async function fetchJibeJobs(company) {
   const jobs = [];
   const seenIds = new Set();
@@ -445,8 +618,55 @@ function mapSuccessFactorsJob(company, job, locale) {
     location,
     office: location,
     url,
-    postedAt: normalizeSuccessFactorsDate(job.unifiedStandardStart || job.postedDate),
+    postedAt: normalizeSuccessFactorsDate(
+      job.postedDate || job.postingDate || job.createdDate || job.requisitionOpenDate,
+    ),
+    closingAt: normalizeSuccessFactorsDate(job.unifiedStandardEnd || job.jobEndDate || job.endDate),
     searchText: [title, location, department].join(' '),
+  });
+}
+
+function mapWorkdayJob(company, job, locationHint = '') {
+  const title = stripHtml(job.title);
+  const baseLocation = normalizeWhitespace(job.locationsText || arrayFrom(job.locations).map(collectNames).flat().join('; '));
+  const location = normalizeWhitespace(
+    locationHint && baseLocation && !LONDON_PATTERN.test(baseLocation)
+      ? `${baseLocation} (${locationHint})`
+      : baseLocation,
+  );
+  const categories = normalizeWhitespace([...arrayFrom(job.bulletFields), job.timeType].filter(Boolean).join(', '));
+  const url = workdayJobUrl(company, job.externalPath || job.url);
+
+  return normalizeJob(company, {
+    id: workdayJobId(job) || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: normalizeWorkdayPostedOn(job.postedOn),
+    searchText: [title, location, categories, locationHint].join(' '),
+  });
+}
+
+function mapParadoxJob(company, job) {
+  const title = stripHtml(job.title);
+  const location = normalizeWhitespace(uniqueStrings(arrayFrom(job.locations).map(paradoxLocation).filter(Boolean)).join('; '));
+  const fieldValues = uniqueStrings([
+    ...arrayFrom(job.employmentType),
+    ...arrayFrom(job.employmentStatus),
+    ...arrayFrom(job.customFields).map((field) => field?.value),
+    ...arrayFrom(job.jobCardExtraFields).flatMap((field) => arrayFrom(field?.value)),
+  ]).join(', ');
+  const url = canonicalUrl(job.originalURL || job.applyURL, company.careersUrl || company.url);
+
+  return normalizeJob(company, {
+    id: job.requisitionID || job.reference || job.uniqueID || job.sourceID || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: normalizeDate(job.datePosted || job.postedDate || job.createDate),
+    searchText: [title, location, fieldValues].join(' '),
   });
 }
 
@@ -591,6 +811,68 @@ function workableLocation(job) {
   return [job.city, job.state, job.country].filter(Boolean).join(', ');
 }
 
+function workdayJobId(job) {
+  return arrayFrom(job.bulletFields).find((field) => /\b(?:JR|R)-?\d+/i.test(String(field)))
+    || matchFirst(job.externalPath || '', [/_(JR-?\d+|R-?\d+(?:-\d+)?)$/i])
+    || job.externalPath;
+}
+
+function workdayJobUrl(company, externalPath) {
+  const baseUrl = (company.careersUrl || company.url).replace(/\/$/, '');
+  const path = String(externalPath || '');
+  if (!path) return baseUrl;
+  if (/^https?:\/\//i.test(path)) return canonicalUrl(path, baseUrl);
+  return canonicalUrl(`${baseUrl}/${path.replace(/^\//, '')}`, baseUrl);
+}
+
+function paradoxLocation(location) {
+  if (!location || typeof location !== 'object') return normalizeWhitespace(location);
+
+  return normalizeWhitespace(
+    location.locationText
+      || location.locationParsedText
+      || [location.city || location.locationName, location.state || location.stateAbbr, location.country].filter(Boolean).join(', '),
+  );
+}
+
+function revolutLocation(location) {
+  if (!location || typeof location !== 'object') return normalizeWhitespace(location);
+
+  const name = normalizeWhitespace(location.name);
+  const country = normalizeWhitespace(location.country);
+  if (!name) return country;
+  if (!country || name.toLowerCase().includes(country.toLowerCase())) return name;
+  return `${name}, ${country}`;
+}
+
+function extractIcimsField(block, label) {
+  const srOnlyPattern = new RegExp(`<span class="sr-only field-label">\\s*${escapeRegExp(label)}\\s*<\\/span>\\s*<span[^>]*>([\\s\\S]*?)<\\/span>`, 'i');
+  const srOnlyMatch = block.match(srOnlyPattern);
+  if (srOnlyMatch) return stripHtml(srOnlyMatch[1]);
+
+  const definitionPattern = new RegExp(`<dt[^>]*>\\s*${escapeRegExp(label)}\\s*<\\/dt>\\s*<dd[^>]*>([\\s\\S]*?)<\\/dd>`, 'i');
+  const definitionMatch = block.match(definitionPattern);
+  return definitionMatch ? stripHtml(definitionMatch[1]) : '';
+}
+
+function cleanIcimsUrl(url) {
+  if (!url) return '';
+
+  try {
+    const parsed = new URL(url);
+    ['in_iframe', 'hashed', 'mobile', 'needsRedirect'].forEach((key) => parsed.searchParams.delete(key));
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function normalizeIcimsDate(value) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return '';
+  return normalizeDate(`${normalized} GMT`);
+}
+
 function mapJibeJob(company, job) {
   const title = stripHtml(job.title);
   const location = normalizeWhitespace(
@@ -637,9 +919,26 @@ export function isLondonJob(job) {
   return ukRemote && LONDON_PATTERN.test(supportingText);
 }
 
+export async function verifyJobIsOpenForAlert(job, now = new Date()) {
+  if (job.companySlug !== 'bbc') return { open: true };
+
+  const html = await fetchText(job.url);
+  const closingAt = extractBbcJobClosingDate(html);
+  if (!closingAt) return { open: true };
+
+  if (dateOnlyTimestamp(closingAt) < dateOnlyTimestamp(now)) {
+    return {
+      open: false,
+      reason: `closed on ${closingAt.slice(0, 10)}`,
+    };
+  }
+
+  return { open: true, closingAt };
+}
+
 async function fetchGreenhouseJobs(company) {
   const data = await fetchJson(company.url);
-  const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+  const jobs = Array.isArray(data?.jobs) ? data.jobs : Array.isArray(data) ? data : [];
 
   return jobs.map((job) => {
     const offices = collectNames(job.offices);
@@ -890,12 +1189,16 @@ async function fetchJson(url) {
 }
 
 async function postJson(url, body) {
+  return postJsonWithHeaders(url, body, {
+    accept: 'application/json',
+    'content-type': 'application/json',
+  });
+}
+
+async function postJsonWithHeaders(url, body, headers) {
   const response = await fetchWithTimeout(url, {
     method: 'POST',
-    headers: {
-      accept: 'application/json',
-      'content-type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(body),
   });
 
@@ -911,9 +1214,50 @@ async function postJson(url, body) {
   }
 }
 
+async function postJsonWithRetry(url, body, headers, maxAttempts = 2) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+
+    if (response.ok) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`Expected JSON but received: ${text.slice(0, 160)}`);
+      }
+    }
+
+    if ((response.status === 403 || response.status === 429) && attempt < maxAttempts) {
+      await delay(readerRetryDelayMs(response.headers, text));
+      continue;
+    }
+
+    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
+  }
+
+  throw new Error('POST JSON retry failed');
+}
+
 async function fetchText(url) {
   const { text } = await fetchTextWithHeaders(url);
   return text;
+}
+
+async function fetchTextWithRetry(url, init = {}, maxAttempts = 2) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fetchTextWithHeaders(url, init);
+    } catch (error) {
+      if (!/HTTP (?:403|429)/i.test(errorMessage(error)) || attempt >= maxAttempts) throw error;
+      await delay(5000);
+    }
+  }
+
+  throw new Error('Text retry failed');
 }
 
 async function fetchTextWithHeaders(url, init = {}) {
@@ -931,6 +1275,31 @@ async function fetchTextWithHeaders(url, init = {}) {
   }
 
   return { text, headers: response.headers };
+}
+
+async function fetchReaderHtml(url) {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetchWithTimeout(url, {
+      headers: {
+        ...browserHeaders('text/html,*/*;q=0.8'),
+        'x-return-format': 'html',
+      },
+    });
+    const text = await response.text();
+
+    if (response.ok) return text;
+
+    if (response.status === 429 && attempt < maxAttempts) {
+      await delay(readerRetryDelayMs(response.headers, text));
+      continue;
+    }
+
+    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
+  }
+
+  throw new Error('Reader fetch failed');
 }
 
 async function fetchWithTimeout(url, init = {}) {
@@ -957,6 +1326,25 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readerRetryDelayMs(headers, text) {
+  const retryAfterHeader = Number(headers.get('retry-after'));
+  if (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0) {
+    return Math.min(retryAfterHeader * 1000, 20000);
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    const retryAfter = Number(parsed?.retryAfter);
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      return Math.min(retryAfter * 1000, 20000);
+    }
+  } catch {
+    // Fall through to a short default backoff.
+  }
+
+  return 5000;
+}
+
 function normalizeJob(company, job) {
   const url = canonicalUrl(job.url || company.careersUrl || company.url, company.url);
   const title = normalizeWhitespace(job.title || 'Untitled job');
@@ -973,6 +1361,7 @@ function normalizeJob(company, job) {
     office,
     url,
     postedAt: normalizeDate(job.postedAt),
+    closingAt: normalizeDate(job.closingAt),
     parserType: company.parserType,
     searchText: normalizeWhitespace(job.searchText || [title, location, office].join(' ')),
   };
@@ -994,7 +1383,60 @@ function normalizeSuccessFactorsDate(value) {
   const normalized = normalizeWhitespace(value);
   const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (match) return normalizeDate(`${match[3]}-${match[2]}-${match[1]}T00:00:00Z`);
-  return normalizeDate(normalized);
+  return normalizeHumanDate(normalized) || normalizeDate(normalized);
+}
+
+function extractBbcJobClosingDate(html) {
+  const text = normalizeWhitespace(stripHtml(html));
+  const match = text.match(
+    /Job Closing Date:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{1,2}\/\d{1,2}\/\d{4})/i,
+  );
+
+  if (!match) return '';
+
+  return normalizeSuccessFactorsDate(match[1]);
+}
+
+function normalizeHumanDate(value) {
+  const normalized = normalizeWhitespace(value);
+  const match = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})\b/i);
+  if (!match) return '';
+
+  const month = MONTH_INDEX[match[2].toLowerCase()];
+  if (month == null) return '';
+
+  const day = Number(match[1]);
+  const year = Number(match[3]);
+  if (!Number.isInteger(day) || !Number.isInteger(year) || day < 1 || day > 31) return '';
+
+  return new Date(Date.UTC(year, month, day)).toISOString();
+}
+
+function dateOnlyTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return Number.NaN;
+
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function normalizeWorkdayPostedOn(value) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return '';
+
+  if (/today/i.test(normalized)) return normalizeRelativeDate(0);
+  if (/yesterday/i.test(normalized)) return normalizeRelativeDate(1);
+
+  const daysMatch = normalized.match(/Posted\s+(\d+)\+?\s+Days?\s+Ago/i);
+  if (daysMatch) return normalizeRelativeDate(Number(daysMatch[1]));
+
+  return normalizeDate(normalized.replace(/^Posted\s+/i, ''));
+}
+
+function normalizeRelativeDate(daysAgo) {
+  const days = Number.isFinite(daysAgo) ? daysAgo : 0;
+  const date = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  date.setUTCHours(0, 0, 0, 0);
+  return date.toISOString();
 }
 
 function normalizeUnixTimestamp(value) {
@@ -1022,11 +1464,11 @@ function collectNames(value) {
   return [normalizeWhitespace(String(value))];
 }
 
-function browserHeaders(accept) {
+function browserHeaders(accept, userAgent = BROWSER_USER_AGENT) {
   return {
     accept,
     'accept-language': 'en-GB,en;q=0.9',
-    'user-agent': BROWSER_USER_AGENT,
+    'user-agent': userAgent,
   };
 }
 

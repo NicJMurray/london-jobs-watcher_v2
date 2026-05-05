@@ -1,14 +1,15 @@
 # london-jobs-watcher
 
-A Cloudflare Worker that runs hourly, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs or a no-new-listings status.
+A Cloudflare Worker that runs hourly, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs.
 
 ## What It Does
 
 - Runs on a Cloudflare Workers cron schedule: `0 * * * *`
 - Checks companies listed in [src/companies.js](src/companies.js)
-- Supports Greenhouse, Lever, Ashby, and a basic fetch-based HTML fallback
+- Supports Greenhouse, Lever, Ashby, Workday, iCIMS, Paradox, and a basic fetch-based HTML fallback
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
 - Sends one Telegram message only when new London jobs are discovered
+- Records older first-seen jobs quietly when the source exposes a posted date older than 14 days
 - Keeps going if one company fails and includes a warning in Telegram when new jobs are found
 
 ## Requirements
@@ -114,7 +115,7 @@ Send a Telegram test message:
 curl http://localhost:8787/test-telegram
 ```
 
-Send one current/latest parsed London job per enabled company as a Telegram test digest:
+Send one latest parsed London job per enabled company as a Telegram test digest:
 
 ```bash
 curl http://localhost:8787/test-latest-jobs
@@ -172,8 +173,8 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 
 - `GET /health` returns `OK`
 - `GET or POST /test-telegram` sends a Telegram test message
-- `GET or POST /test-latest-jobs` sends one current/latest parsed London job per enabled company without changing KV
-- `GET or POST /run-now` checks companies immediately and sends a Telegram update, including a no-new-listings message when there are no new London jobs
+- `GET or POST /test-latest-jobs` sends one latest parsed London job per enabled company without changing KV
+- `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found or a company fails
 - `GET /run-now?notify=false` checks companies without sending Telegram
 - `GET /debug-seen` shows the current KV dedupe count and recent seen jobs
 
@@ -192,6 +193,10 @@ Non-London UK jobs are excluded unless London appears somewhere in the parsed jo
 
 The Worker stores all first-seen jobs, not just London jobs. This avoids noisy alerts when an existing non-London job is later edited to mention London.
 
+Telegram alerts are still based on first-seen jobs, not just jobs posted in the last hour. If a parser is fixed or KV is reset, the Worker may discover existing jobs for the first time. To avoid noisy backfill, dated jobs posted more than 14 days ago are saved to KV but not sent to Telegram.
+
+For BBC, the Worker also checks the job detail page before alerting a first-seen BBC role. If the visible `Job Closing Date` has already passed, that role is saved to KV but not sent.
+
 KV shape:
 
 ```json
@@ -204,7 +209,9 @@ KV shape:
       "company": "Example",
       "title": "Example role",
       "location": "London",
-      "url": "https://example.com/jobs/123"
+      "url": "https://example.com/jobs/123",
+      "postedAt": "2026-05-04T12:00:00.000Z",
+      "closingAt": ""
     }
   }
 }
@@ -233,12 +240,16 @@ Supported `parserType` values:
 - `spotify` for Spotify's public Life at Spotify jobs API
 - `successfactors` for SAP SuccessFactors Recruiting jobs APIs, currently used for BBC
 - `workable` for Workable-style job listing feeds, currently used for Starling Bank
+- `workday` for Workday CXS jobs APIs, currently used for Sony
+- `icims` for iCIMS careers portal HTML, currently used for Fujifilm
+- `paradox` for Paradox careers site jobs APIs when Workday or another direct feed is not available
 - `jibe` for Jibe/iCIMS careers search APIs, currently used for Garmin
 - `eightfold-embedded` for Eightfold pages that embed job data in server-rendered HTML, currently used for Netflix
 - `eightfold-pcsx` for Eightfold PCSX search APIs, currently used for Microsoft
 - `meta-graphql` for Meta's public careers Relay search endpoint
 - `apple` for Apple's paginated jobs search data
 - `next-greenhouse` for sites that embed Greenhouse jobs in Next.js page data
+- `revolut-next` for Revolut's server-rendered Next.js careers positions payload
 - `html` for basic fetch-based link parsing
 
 To temporarily stop checking a company, set:
