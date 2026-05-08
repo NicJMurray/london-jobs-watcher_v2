@@ -9,6 +9,7 @@ A Cloudflare Worker that runs hourly, checks configured company careers pages/AP
 - Supports Greenhouse, Lever, Ashby, Workday, iCIMS, Paradox, and a basic fetch-based HTML fallback
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
 - Sends one Telegram message only when new London jobs are discovered
+- Sends birthday and anniversary Telegram reminders the day before and the day of, using the same Telegram bot
 - Records older first-seen jobs quietly when the source exposes a posted date older than 14 days
 - Keeps going if one company fails and includes failure warnings only when new jobs are found, or when every enabled company fails
 
@@ -135,6 +136,18 @@ curl "http://localhost:8787/run-now?notify=false"
 
 This still records first-seen jobs in KV. Use it when you want to seed the dedupe list without sending an initial batch of existing jobs.
 
+Preview birthday reminders without sending Telegram:
+
+```bash
+curl "http://localhost:8787/run-birthday-reminders?date=2026-03-10&notify=false"
+```
+
+Send today's birthday reminders manually:
+
+```bash
+curl http://localhost:8787/run-birthday-reminders
+```
+
 Inspect KV dedupe state:
 
 ```bash
@@ -176,7 +189,27 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 - `GET or POST /test-latest-jobs` sends one latest parsed London job per enabled company without changing KV
 - `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found, or when every enabled company fails
 - `GET /run-now?notify=false` checks companies without sending Telegram
+- `GET or POST /run-birthday-reminders` sends due birthday and anniversary reminders
+- `GET /run-birthday-reminders?date=YYYY-MM-DD&notify=false` previews birthday reminders for a date without sending Telegram
 - `GET /debug-seen` shows the current KV dedupe count and recent seen jobs
+
+## Add Or Edit Birthdays
+
+Edit [src/birthdays.js](src/birthdays.js). Each entry has:
+
+```js
+{ name: 'New Person', date: '24/06' }
+```
+
+For non-birthdays, add a `kind`:
+
+```js
+{ name: 'Parents', date: '05/10', kind: 'anniversary' }
+```
+
+The Worker runs hourly for jobs, but birthday reminders are sent only once during the `08:00` hour in `Europe/London`. Sent birthday reminders are recorded in KV under `birthday-reminders-v1` so the hourly cron does not send duplicates.
+
+Editing `src/birthdays.js` in GitHub updates the deployed Worker after the `main` branch deploy finishes. The GitHub Actions deploy starts automatically on pushes to `main`.
 
 ## London Filtering
 

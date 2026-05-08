@@ -1,12 +1,17 @@
+import { BIRTHDAY_EVENTS } from './birthdays.js';
 import { COMPANIES } from './companies.js';
 import { fetchCompanyJobs, isLondonJob, verifyJobIsOpenForAlert } from './parsers.js';
 
 const SEEN_KV_KEY = 'seen-jobs-v1';
+const BIRTHDAY_REMINDER_KV_KEY = 'birthday-reminders-v1';
+const BIRTHDAY_REMINDER_TIME_ZONE = 'Europe/London';
+const BIRTHDAY_REMINDER_HOUR = 8;
 const MAX_DEBUG_JOBS = 100;
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3900;
 const COMPANY_FETCH_CONCURRENCY = 6;
 const MAX_ALERT_JOB_AGE_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 export default {
   async fetch(request, env) {
@@ -37,6 +42,18 @@ export default {
         return jsonResponse(summarizeRun(result), { status });
       }
 
+      if (['GET', 'POST'].includes(request.method) && url.pathname === '/run-birthday-reminders') {
+        const shouldNotify = url.searchParams.get('notify') !== 'false';
+        const result = await runBirthdayReminders(env, {
+          trigger: 'manual',
+          notify: shouldNotify,
+          force: url.searchParams.get('force') === 'true',
+          dateOverride: url.searchParams.get('date') || '',
+        });
+        const status = result.notification?.error ? 502 : 200;
+        return jsonResponse(result, { status });
+      }
+
       if (request.method === 'GET' && url.pathname === '/debug-seen') {
         const limit = clampNumber(Number(url.searchParams.get('limit') || 25), 1, MAX_DEBUG_JOBS);
         const seenStore = await loadSeenStore(env);
@@ -62,13 +79,20 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      runWatcher(env, { trigger: 'scheduled', notify: true }).catch((error) => {
-        console.error('Scheduled run failed', error);
-      }),
-    );
+    ctx.waitUntil(runScheduledTasks(env));
   },
 };
+
+async function runScheduledTasks(env) {
+  await Promise.all([
+    runWatcher(env, { trigger: 'scheduled', notify: true }).catch((error) => {
+      console.error('Scheduled jobs run failed', error);
+    }),
+    runBirthdayReminders(env, { trigger: 'scheduled', notify: true }).catch((error) => {
+      console.error('Scheduled birthday reminder run failed', error);
+    }),
+  ]);
+}
 
 async function runWatcher(env, options = {}) {
   const startedAt = new Date();
@@ -305,6 +329,97 @@ async function runLatestJobsTest(env, options = {}) {
   };
 }
 
+async function runBirthdayReminders(env, options = {}) {
+  const startedAt = new Date();
+  const startedAtIso = startedAt.toISOString();
+  const trigger = options.trigger || 'manual';
+  const localDate = options.dateOverride
+    ? parseIsoDateParts(options.dateOverride)
+    : getLocalDateParts(startedAt, BIRTHDAY_REMINDER_TIME_ZONE);
+
+  const result = {
+    ok: true,
+    trigger,
+    startedAt: startedAtIso,
+    finishedAt: null,
+    localDate: localDate.ymd,
+    localHour: localDate.hour,
+    timeZone: BIRTHDAY_REMINDER_TIME_ZONE,
+    reminderHour: BIRTHDAY_REMINDER_HOUR,
+    dueEvents: [],
+    skippedAlreadySent: [],
+    skippedReason: '',
+    messagePreview: '',
+    notification: {
+      attempted: false,
+      sent: false,
+      error: null,
+    },
+  };
+
+  if (trigger === 'scheduled' && localDate.hour !== BIRTHDAY_REMINDER_HOUR) {
+    result.skippedReason = `outside ${BIRTHDAY_REMINDER_TIME_ZONE} ${String(BIRTHDAY_REMINDER_HOUR).padStart(2, '0')}:00 reminder hour`;
+    result.finishedAt = new Date().toISOString();
+    return result;
+  }
+
+  const allEvents = [
+    ...collectBirthdayReminderEvents(BIRTHDAY_EVENTS, localDate, 'today'),
+    ...collectBirthdayReminderEvents(BIRTHDAY_EVENTS, addCalendarDays(localDate, 1), 'tomorrow'),
+  ];
+
+  if (allEvents.length === 0) {
+    result.skippedReason = 'no birthdays or anniversaries today or tomorrow';
+    result.finishedAt = new Date().toISOString();
+    return result;
+  }
+
+  const store = await loadBirthdayReminderStore(env);
+  const force = options.force === true;
+  const dueEvents = allEvents.filter((event) => force || !store.reminders[event.key]);
+
+  result.dueEvents = dueEvents.map(publicBirthdayReminderEvent);
+  result.skippedAlreadySent = allEvents
+    .filter((event) => !force && store.reminders[event.key])
+    .map(publicBirthdayReminderEvent);
+
+  if (dueEvents.length === 0) {
+    result.skippedReason = 'matching reminders have already been sent';
+    result.finishedAt = new Date().toISOString();
+    return result;
+  }
+
+  const message = formatBirthdayReminderMessage(dueEvents);
+  result.messagePreview = message;
+
+  if (options.notify !== false) {
+    result.notification.attempted = true;
+    try {
+      await sendTelegramMessage(env, message);
+      result.notification.sent = true;
+    } catch (error) {
+      result.ok = false;
+      result.notification.error = errorMessage(error);
+      console.error('Birthday reminder Telegram notification failed', error);
+    }
+  }
+
+  if (result.notification.sent) {
+    const nowIso = new Date().toISOString();
+    for (const event of dueEvents) {
+      store.reminders[event.key] = nowIso;
+    }
+    await saveBirthdayReminderStore(env, {
+      version: 1,
+      updatedAt: nowIso,
+      reminders: store.reminders,
+    });
+  }
+
+  result.finishedAt = new Date().toISOString();
+  return result;
+}
+
 async function checkCompany(company) {
   try {
     const jobs = await fetchCompanyJobs(company);
@@ -360,6 +475,31 @@ async function loadSeenStore(env) {
 async function saveSeenStore(env, seenStore) {
   assertKvBinding(env);
   await env.SEEN_JOBS.put(SEEN_KV_KEY, JSON.stringify(seenStore));
+}
+
+async function loadBirthdayReminderStore(env) {
+  assertKvBinding(env);
+
+  const raw = await env.SEEN_JOBS.get(BIRTHDAY_REMINDER_KV_KEY);
+  if (!raw) return { version: 1, reminders: {} };
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`KV key ${BIRTHDAY_REMINDER_KV_KEY} does not contain valid JSON`);
+  }
+
+  if (parsed?.reminders && typeof parsed.reminders === 'object' && !Array.isArray(parsed.reminders)) {
+    return { version: parsed.version || 1, reminders: parsed.reminders };
+  }
+
+  throw new Error(`KV key ${BIRTHDAY_REMINDER_KV_KEY} has an unsupported shape`);
+}
+
+async function saveBirthdayReminderStore(env, birthdayReminderStore) {
+  assertKvBinding(env);
+  await env.SEEN_JOBS.put(BIRTHDAY_REMINDER_KV_KEY, JSON.stringify(birthdayReminderStore));
 }
 
 function assertKvBinding(env) {
@@ -432,6 +572,156 @@ function formatTelegramRunMessage(run) {
   }
 
   return lines.join('\n').trim();
+}
+
+function collectBirthdayReminderEvents(events, targetDate, timing) {
+  return events
+    .map((event) => normalizeBirthdayEvent(event))
+    .filter((event) => event.month === targetDate.month && event.day === targetDate.day)
+    .map((event) => ({
+      key: `${targetDate.ymd}:${timing}:${event.name}:${event.date}`,
+      timing,
+      targetDate: targetDate.ymd,
+      shortDate: formatShortDate(targetDate),
+      label: birthdayEventLabel(event),
+    }));
+}
+
+function normalizeBirthdayEvent(event) {
+  if (!event || typeof event !== 'object') {
+    throw new Error('Birthday event entries must be objects');
+  }
+
+  const name = String(event.name || '').trim();
+  if (!name) {
+    throw new Error('Birthday event is missing a name');
+  }
+
+  const { month, day } = parseBirthdayDate(event.date, name);
+  return {
+    name,
+    date: String(event.date).trim(),
+    month,
+    day,
+    kind: String(event.kind || 'birthday').trim().toLowerCase() || 'birthday',
+    label: String(event.label || '').trim(),
+  };
+}
+
+function parseBirthdayDate(value, name) {
+  const dateText = String(value || '').trim();
+  const match = /^(\d{1,2})\/(\d{1,2})$/.exec(dateText);
+  if (!match) {
+    throw new Error(`${name}: birthday date must use DD/MM format`);
+  }
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const parsedDate = new Date(Date.UTC(2000, month - 1, day, 12));
+  if (
+    !Number.isInteger(day)
+    || !Number.isInteger(month)
+    || parsedDate.getUTCMonth() + 1 !== month
+    || parsedDate.getUTCDate() !== day
+  ) {
+    throw new Error(`${name}: invalid birthday date ${dateText}`);
+  }
+
+  return { month, day };
+}
+
+function birthdayEventLabel(event) {
+  if (event.label) return event.label;
+  if (event.kind === 'birthday') return `${event.name}'s birthday`;
+  return `${event.name} ${event.kind}`;
+}
+
+function formatBirthdayReminderMessage(events) {
+  const todayEvents = events.filter((event) => event.timing === 'today');
+  const tomorrowEvents = events.filter((event) => event.timing === 'tomorrow');
+  const lines = ['Birthday reminders'];
+
+  if (todayEvents.length > 0) {
+    lines.push(`Today (${todayEvents[0].shortDate}): ${joinLabels(todayEvents)}`);
+  }
+
+  if (tomorrowEvents.length > 0) {
+    lines.push(`Tomorrow (${tomorrowEvents[0].shortDate}): ${joinLabels(tomorrowEvents)}`);
+  }
+
+  return lines.join('\n');
+}
+
+function joinLabels(events) {
+  const labels = events.map((event) => event.label);
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(', ')}, and ${labels.at(-1)}`;
+}
+
+function publicBirthdayReminderEvent(event) {
+  return {
+    timing: event.timing,
+    targetDate: event.targetDate,
+    label: event.label,
+  };
+}
+
+function getLocalDateParts(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  return makeDateParts(Number(parts.year), Number(parts.month), Number(parts.day), Number(parts.hour));
+}
+
+function parseIsoDateParts(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || '').trim());
+  if (!match) {
+    throw new Error('date must use YYYY-MM-DD format');
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsedDate = new Date(Date.UTC(year, month - 1, day, 12));
+  if (
+    parsedDate.getUTCFullYear() !== year
+    || parsedDate.getUTCMonth() + 1 !== month
+    || parsedDate.getUTCDate() !== day
+  ) {
+    throw new Error(`invalid date ${value}`);
+  }
+
+  return makeDateParts(year, month, day, BIRTHDAY_REMINDER_HOUR);
+}
+
+function addCalendarDays(dateParts, days) {
+  const date = new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day + days, 12));
+  return makeDateParts(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), dateParts.hour);
+}
+
+function makeDateParts(year, month, day, hour = 0) {
+  return {
+    year,
+    month,
+    day,
+    hour,
+    ymd: [
+      String(year).padStart(4, '0'),
+      String(month).padStart(2, '0'),
+      String(day).padStart(2, '0'),
+    ].join('-'),
+  };
+}
+
+function formatShortDate(dateParts) {
+  return `${dateParts.day} ${MONTH_LABELS[dateParts.month - 1]}`;
 }
 
 function formatLatestJobsTestMessages(result) {
