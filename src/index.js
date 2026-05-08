@@ -54,6 +54,11 @@ export default {
         return jsonResponse(result, { status });
       }
 
+      if (request.method === 'POST' && url.pathname === '/telegram-webhook') {
+        const result = await handleTelegramWebhook(request, env);
+        return jsonResponse(result);
+      }
+
       if (request.method === 'GET' && url.pathname === '/debug-seen') {
         const limit = clampNumber(Number(url.searchParams.get('limit') || 25), 1, MAX_DEBUG_JOBS);
         const seenStore = await loadSeenStore(env);
@@ -420,6 +425,53 @@ async function runBirthdayReminders(env, options = {}) {
   return result;
 }
 
+async function handleTelegramWebhook(request, env) {
+  if (env.TELEGRAM_WEBHOOK_SECRET) {
+    const secret = request.headers.get('x-telegram-bot-api-secret-token');
+    if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
+      return { ok: false, ignored: true, reason: 'invalid webhook secret' };
+    }
+  }
+
+  const update = await request.json().catch(() => null);
+  const message = update?.message;
+  const text = typeof message?.text === 'string' ? message.text.trim() : '';
+  const chatId = message?.chat?.id;
+
+  if (!message || !text || !chatId) {
+    return { ok: true, ignored: true, reason: 'no text message' };
+  }
+
+  if (String(chatId) !== String(env.TELEGRAM_CHAT_ID)) {
+    return { ok: true, ignored: true, reason: 'chat is not allowed' };
+  }
+
+  const command = parseTelegramCommand(text);
+  if (!command) {
+    return { ok: true, ignored: true, reason: 'not a command' };
+  }
+
+  if (['birthdays', 'birthday', 'events', 'nextbirthdays', 'next_events', 'next3'].includes(command)) {
+    const today = getLocalDateParts(new Date(), BIRTHDAY_REMINDER_TIME_ZONE);
+    const reply = formatUpcomingBirthdayEventsMessage(BIRTHDAY_EVENTS, today, 3);
+    await sendTelegramMessage(env, reply, {
+      chatId,
+      replyToMessageId: message.message_id,
+    });
+    return { ok: true, handled: true, command };
+  }
+
+  if (['start', 'help'].includes(command)) {
+    await sendTelegramMessage(env, telegramHelpMessage(), {
+      chatId,
+      replyToMessageId: message.message_id,
+    });
+    return { ok: true, handled: true, command };
+  }
+
+  return { ok: true, ignored: true, reason: 'unknown command', command };
+}
+
 async function checkCompany(company) {
   try {
     const jobs = await fetchCompanyJobs(company);
@@ -508,24 +560,31 @@ function assertKvBinding(env) {
   }
 }
 
-async function sendTelegramMessage(env, text) {
+async function sendTelegramMessage(env, text, options = {}) {
   if (!env.TELEGRAM_BOT_TOKEN) {
     throw new Error('TELEGRAM_BOT_TOKEN is not set');
   }
 
-  if (!env.TELEGRAM_CHAT_ID) {
+  const chatId = options.chatId || env.TELEGRAM_CHAT_ID;
+  if (!chatId) {
     throw new Error('TELEGRAM_CHAT_ID is not set');
+  }
+
+  const body = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+  };
+
+  if (options.replyToMessageId) {
+    body.reply_parameters = { message_id: options.replyToMessageId };
   }
 
   const endpoint = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: env.TELEGRAM_CHAT_ID,
-      text,
-      disable_web_page_preview: true,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -572,6 +631,74 @@ function formatTelegramRunMessage(run) {
   }
 
   return lines.join('\n').trim();
+}
+
+function formatUpcomingBirthdayEventsMessage(events, today, limit) {
+  const upcomingEvents = getUpcomingBirthdayEvents(events, today, limit);
+  const lines = ['Next birthdays/events'];
+
+  for (const [index, event] of upcomingEvents.entries()) {
+    lines.push(`${index + 1}. ${event.label} - ${formatUpcomingDate(event.date, today)} (${formatDaysUntil(event.daysUntil)})`);
+  }
+
+  return lines.join('\n');
+}
+
+function getUpcomingBirthdayEvents(events, today, limit) {
+  return events
+    .map((event, index) => {
+      const normalized = normalizeBirthdayEvent(event);
+      const dateParts = nextOccurrenceDateParts(normalized, today);
+      return {
+        index,
+        label: birthdayEventLabel(normalized),
+        date: dateParts,
+        daysUntil: calendarDayDiff(today, dateParts),
+      };
+    })
+    .sort((a, b) => a.daysUntil - b.daysUntil || a.index - b.index)
+    .slice(0, limit);
+}
+
+function nextOccurrenceDateParts(event, today) {
+  let year = today.year;
+  let candidate = makeDateParts(year, event.month, event.day, today.hour);
+  if (calendarDayDiff(today, candidate) < 0) {
+    year += 1;
+    candidate = makeDateParts(year, event.month, event.day, today.hour);
+  }
+  return candidate;
+}
+
+function calendarDayDiff(fromDate, toDate) {
+  const from = Date.UTC(fromDate.year, fromDate.month - 1, fromDate.day);
+  const to = Date.UTC(toDate.year, toDate.month - 1, toDate.day);
+  return Math.round((to - from) / DAY_MS);
+}
+
+function formatUpcomingDate(dateParts, today) {
+  const suffix = dateParts.year === today.year ? '' : ` ${dateParts.year}`;
+  return `${formatShortDate(dateParts)}${suffix}`;
+}
+
+function formatDaysUntil(daysUntil) {
+  if (daysUntil === 0) return 'today';
+  if (daysUntil === 1) return 'tomorrow';
+  return `in ${daysUntil} days`;
+}
+
+function parseTelegramCommand(text) {
+  if (!text.startsWith('/')) return '';
+  const firstToken = text.split(/\s+/)[0];
+  return firstToken.slice(1).split('@')[0].toLowerCase();
+}
+
+function telegramHelpMessage() {
+  return [
+    'Commands',
+    '/birthdays - show the next 3 birthdays/events',
+    '/events - show the next 3 birthdays/events',
+  ].join('\n');
 }
 
 function collectBirthdayReminderEvents(events, targetDate, timing) {
