@@ -9,6 +9,8 @@ A Cloudflare Worker that runs hourly, checks configured company careers pages/AP
 - Supports Greenhouse, Lever, Ashby, Workday, iCIMS, Paradox, and a basic fetch-based HTML fallback
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
 - Sends one Telegram message only when new London jobs are discovered
+- Sends birthday and anniversary Telegram reminders the day before and the day of, using the same Telegram bot
+- Replies to Telegram `/birthdays` and `/events` commands with the next 3 birthdays/events
 - Records older first-seen jobs quietly when the source exposes a posted date older than 14 days
 - Keeps going if one company fails and includes failure warnings only when new jobs are found, or when every enabled company fails
 
@@ -66,6 +68,7 @@ For deployed Worker secrets:
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_CHAT_ID
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 ```
 
 For local testing, create `.dev.vars` from the example:
@@ -79,6 +82,7 @@ Then edit `.dev.vars`:
 ```text
 TELEGRAM_BOT_TOKEN=123456789:your-real-token
 TELEGRAM_CHAT_ID=123456789
+TELEGRAM_WEBHOOK_SECRET=long-random-secret
 ```
 
 To find your chat ID, send a message to your bot, then open:
@@ -88,6 +92,8 @@ https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getUpdates
 ```
 
 Look for `message.chat.id`.
+
+`TELEGRAM_WEBHOOK_SECRET` can be any long random string. Telegram sends it back with webhook updates so the Worker can reject requests that did not come from Telegram.
 
 ## Local Testing
 
@@ -135,6 +141,27 @@ curl "http://localhost:8787/run-now?notify=false"
 
 This still records first-seen jobs in KV. Use it when you want to seed the dedupe list without sending an initial batch of existing jobs.
 
+Preview birthday reminders without sending Telegram:
+
+```bash
+curl "http://localhost:8787/run-birthday-reminders?date=2026-03-10&notify=false"
+```
+
+Send today's birthday reminders manually:
+
+```bash
+curl http://localhost:8787/run-birthday-reminders
+```
+
+Preview the next 3 birthdays/events command response:
+
+```bash
+curl -X POST http://localhost:8787/telegram-webhook \
+  -H "content-type: application/json" \
+  -H "x-telegram-bot-api-secret-token: long-random-secret" \
+  --data '{"message":{"message_id":1,"chat":{"id":123456789},"text":"/birthdays"}}'
+```
+
 Inspect KV dedupe state:
 
 ```bash
@@ -167,7 +194,16 @@ The Worker still needs its own Telegram secrets in Cloudflare. Set them with:
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_CHAT_ID
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 ```
+
+After the Worker is deployed, register the Telegram webhook once:
+
+```bash
+npm run telegram:webhook -- https://your-worker-url
+```
+
+Use the Worker URL printed by Wrangler or shown in Cloudflare. The script registers `/telegram-webhook` and publishes the `/birthdays` and `/events` bot commands.
 
 ## Endpoints
 
@@ -176,7 +212,44 @@ npx wrangler secret put TELEGRAM_CHAT_ID
 - `GET or POST /test-latest-jobs` sends one latest parsed London job per enabled company without changing KV
 - `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found, or when every enabled company fails
 - `GET /run-now?notify=false` checks companies without sending Telegram
+- `GET or POST /run-birthday-reminders` sends due birthday and anniversary reminders
+- `GET /run-birthday-reminders?date=YYYY-MM-DD&notify=false` previews birthday reminders for a date without sending Telegram
+- `POST /telegram-webhook` handles Telegram slash commands from the configured chat
 - `GET /debug-seen` shows the current KV dedupe count and recent seen jobs
+
+## Telegram Commands
+
+After the webhook is registered, message the bot:
+
+```text
+/birthdays
+```
+
+or:
+
+```text
+/events
+```
+
+The bot replies with the next 3 upcoming birthdays/events. It only responds when the Telegram chat ID matches `TELEGRAM_CHAT_ID`.
+
+## Add Or Edit Birthdays
+
+Edit [src/birthdays.js](src/birthdays.js). Each entry has:
+
+```js
+{ name: 'New Person', date: '24/06' }
+```
+
+For non-birthdays, add a `kind`:
+
+```js
+{ name: 'Parents', date: '05/10', kind: 'anniversary' }
+```
+
+The Worker runs hourly for jobs, but birthday reminders are sent only once during the `08:00` hour in `Europe/London`. Sent birthday reminders are recorded in KV under `birthday-reminders-v1` so the hourly cron does not send duplicates.
+
+Editing `src/birthdays.js` in GitHub updates the deployed Worker after the `main` branch deploy finishes. The GitHub Actions deploy starts automatically on pushes to `main`.
 
 ## London Filtering
 
