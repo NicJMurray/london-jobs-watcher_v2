@@ -5,7 +5,7 @@
   "compatibility_date": "2026-05-04",
   "workers_dev": true,
   "triggers": {
-    "crons": ["0 * * * *"]
+    "crons": ["0 */2 * * *"]
   },
   "kv_namespaces": [
     {

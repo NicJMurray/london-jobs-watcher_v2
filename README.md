@@ -1,10 +1,10 @@
 # london-jobs-watcher
 
-A Cloudflare Worker that runs hourly, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs.
+A Cloudflare Worker that runs every two hours, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs.
 
 ## What It Does
 
-- Runs on a Cloudflare Workers cron schedule: `0 * * * *`
+- Runs on a Cloudflare Workers cron schedule: `0 */2 * * *`
 - Checks companies listed in [src/companies.js](src/companies.js)
 - Supports Greenhouse, Lever, Ashby, Workday, iCIMS, Paradox, and a basic fetch-based HTML fallback
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
@@ -176,7 +176,7 @@ After replacing the KV namespace IDs in [wrangler.jsonc](wrangler.jsonc):
 npm run deploy
 ```
 
-The deployed Worker will run hourly from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
+The deployed Worker will run every two hours from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
 
 ## GitHub Actions Deploy
 
@@ -247,7 +247,7 @@ For non-birthdays, add a `kind`:
 { name: 'Parents', date: '05/10', kind: 'anniversary' }
 ```
 
-The Worker runs hourly for jobs, but birthday reminders are sent only once during the `08:00` hour in `Europe/London`. Sent birthday reminders are recorded in KV under `birthday-reminders-v1` so the hourly cron does not send duplicates.
+The Worker runs every two hours for jobs, but birthday reminders are sent only once during the `08:00` hour in `Europe/London`. Sent birthday reminders are recorded in KV under `birthday-reminders-v1` so repeated cron runs do not send duplicates.
 
 Editing `src/birthdays.js` in GitHub updates the deployed Worker after the `main` branch deploy finishes. The GitHub Actions deploy starts automatically on pushes to `main`.
 
@@ -266,7 +266,7 @@ Non-London UK jobs are excluded unless London appears somewhere in the parsed jo
 
 The Worker stores all first-seen jobs, not just London jobs. This avoids noisy alerts when an existing non-London job is later edited to mention London.
 
-Telegram alerts are still based on first-seen jobs, not just jobs posted in the last hour. If a parser is fixed or KV is reset, the Worker may discover existing jobs for the first time. To avoid noisy backfill, dated jobs posted more than 14 days ago are saved to KV but not sent to Telegram.
+Telegram alerts are still based on first-seen jobs, not just jobs posted in the last two hours. If a parser is fixed or KV is reset, the Worker may discover existing jobs for the first time. To avoid noisy backfill, dated jobs posted more than 14 days ago are saved to KV but not sent to Telegram.
 
 For BBC, the Worker also checks the job detail page before alerting a first-seen BBC role. If the visible `Job Closing Date` has already passed, that role is saved to KV but not sent.
 

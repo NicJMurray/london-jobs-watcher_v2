@@ -198,11 +198,13 @@ async function runWatcher(env, options = {}) {
   const shouldNotify = options.notify !== false;
 
   if (shouldNotify) {
-    const message = formatTelegramRunMessage(run);
-    if (message) {
+    const messages = formatTelegramRunMessages(run);
+    if (messages.length > 0) {
       run.notification.attempted = true;
       try {
-        await sendTelegramMessage(env, message);
+        for (const message of messages) {
+          await sendTelegramMessage(env, message);
+        }
         run.notification.sent = true;
       } catch (error) {
         run.notification.error = errorMessage(error);
@@ -593,33 +595,21 @@ async function sendTelegramMessage(env, text, options = {}) {
   }
 }
 
-function formatTelegramRunMessage(run) {
+function formatTelegramRunMessages(run) {
   const count = run.newLondonJobs.length;
   const allCompaniesFailed = run.checkedCompanies > 0 && run.failures.length >= run.checkedCompanies;
 
-  if (count === 0 && !allCompaniesFailed) return '';
+  if (count === 0 && !allCompaniesFailed) return [];
 
-  const lines = count > 0
-    ? [`${count} new London jobs found`, '']
-    : [`All ${run.checkedCompanies} enabled company checks failed`, ''];
-  let omitted = 0;
+  const header = count > 0
+    ? `${count} new London jobs found`
+    : `All ${run.checkedCompanies} enabled company checks failed`;
+  const blocks = [];
 
   if (count > 0) {
     for (const job of run.newLondonJobs) {
-      const block = `${job.company} — ${job.title}\n${job.location}\n${job.url}`;
-      const candidate = [...lines, block, ''].join('\n');
-
-      if (candidate.length > MAX_TELEGRAM_MESSAGE_LENGTH) {
-        omitted += 1;
-        continue;
-      }
-
-      lines.push(block, '');
+      blocks.push(`${job.company} - ${job.title}\n${job.location}\n${job.url}`);
     }
-  }
-
-  if (omitted > 0) {
-    lines.push(`${omitted} more job${omitted === 1 ? '' : 's'} omitted from this message.`, '');
   }
 
   if (run.failures.length > 0) {
@@ -627,10 +617,10 @@ function formatTelegramRunMessage(run) {
     const prefix = allCompaniesFailed && count === 0
       ? 'Failed companies'
       : `Warning: ${run.failures.length} compan${run.failures.length === 1 ? 'y' : 'ies'} failed`;
-    lines.push(`${prefix}: ${failedCompanies.join(', ')}`);
+    blocks.push(`${prefix}: ${failedCompanies.join(', ')}`);
   }
 
-  return lines.join('\n').trim();
+  return chunkTelegramBlocks(header, blocks);
 }
 
 function formatUpcomingBirthdayEventsMessage(events, today, limit) {
@@ -854,7 +844,7 @@ function formatShortDate(dateParts) {
 function formatLatestJobsTestMessages(result) {
   const blocks = result.latestJobs.map((job) => {
     const lines = [
-      `${job.company} — ${job.title}`,
+      `${job.company} - ${job.title}`,
       job.location,
     ];
 
