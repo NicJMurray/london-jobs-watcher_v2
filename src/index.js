@@ -9,6 +9,7 @@ const BIRTHDAY_REMINDER_HOUR = 8;
 const MAX_DEBUG_JOBS = 100;
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3900;
 const COMPANY_FETCH_CONCURRENCY = 6;
+const SCHEDULED_COMPANY_SHARDS = 3;
 const MAX_ALERT_JOB_AGE_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -30,14 +31,22 @@ export default {
 
       if (['GET', 'POST'].includes(request.method) && url.pathname === '/test-latest-jobs') {
         const includeDisabled = url.searchParams.get('includeDisabled') === 'true';
-        const result = await runLatestJobsTest(env, { includeDisabled });
+        const shardOptions = parseShardSearchParams(url.searchParams);
+        const result = await runLatestJobsTest(env, { includeDisabled, ...shardOptions });
         const status = result.notification?.error ? 502 : 200;
         return jsonResponse(result, { status });
       }
 
       if (['GET', 'POST'].includes(request.method) && url.pathname === '/run-now') {
         const shouldNotify = url.searchParams.get('notify') !== 'false';
-        const result = await runWatcher(env, { trigger: 'manual', notify: shouldNotify });
+        const shouldSaveSeen = url.searchParams.get('save') !== 'false';
+        const shardOptions = parseShardSearchParams(url.searchParams);
+        const result = await runWatcher(env, {
+          trigger: 'manual',
+          notify: shouldNotify,
+          saveSeen: shouldSaveSeen,
+          ...shardOptions,
+        });
         const status = result.notification?.error ? 502 : 200;
         return jsonResponse(summarizeRun(result), { status });
       }
@@ -84,13 +93,20 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runScheduledTasks(env));
+    ctx.waitUntil(runScheduledTasks(env, { scheduledTime: event.scheduledTime }));
   },
 };
 
-async function runScheduledTasks(env) {
+async function runScheduledTasks(env, options = {}) {
+  const companyShard = scheduledCompanyShard(options.scheduledTime);
+
   await Promise.all([
-    runWatcher(env, { trigger: 'scheduled', notify: true }).catch((error) => {
+    runWatcher(env, {
+      trigger: 'scheduled',
+      notify: true,
+      companyShard,
+      companyShards: SCHEDULED_COMPANY_SHARDS,
+    }).catch((error) => {
       console.error('Scheduled jobs run failed', error);
     }),
     runBirthdayReminders(env, { trigger: 'scheduled', notify: true }).catch((error) => {
@@ -105,8 +121,12 @@ async function runWatcher(env, options = {}) {
   const seenStore = await loadSeenStore(env);
   const seenJobs = seenStore.jobs;
 
-  const enabledCompanies = COMPANIES.filter((company) => company.enabled);
+  const enabledCompaniesAll = COMPANIES.filter((company) => company.enabled);
   const disabledCompanies = COMPANIES.filter((company) => !company.enabled);
+  const companyShard = normalizeCompanyShard(options.companyShard, options.companyShards);
+  const enabledCompanies = companyShard
+    ? enabledCompaniesAll.filter((_, index) => index % companyShard.total === companyShard.index)
+    : enabledCompaniesAll;
 
   const run = {
     ok: true,
@@ -114,7 +134,10 @@ async function runWatcher(env, options = {}) {
     startedAt: startedAtIso,
     finishedAt: null,
     checkedCompanies: enabledCompanies.length,
+    totalEnabledCompanies: enabledCompaniesAll.length,
     disabledCompanies: disabledCompanies.length,
+    companyShard,
+    saveSeen: options.saveSeen !== false,
     totalJobsFound: 0,
     londonJobsFound: 0,
     firstSeenJobs: 0,
@@ -215,7 +238,7 @@ async function runWatcher(env, options = {}) {
 
   const notificationFailed = run.notification.attempted && !run.notification.sent && run.notification.error;
 
-  if (seenStoreChanged && !notificationFailed) {
+  if (seenStoreChanged && !notificationFailed && options.saveSeen !== false) {
     await saveSeenStore(env, {
       version: 1,
       updatedAt: new Date().toISOString(),
@@ -259,8 +282,12 @@ function staleAlertReason(job, runStartedAt) {
 
 async function runLatestJobsTest(env, options = {}) {
   const startedAt = new Date().toISOString();
-  const companies = COMPANIES.filter((company) => options.includeDisabled || company.enabled);
+  const allCompanies = COMPANIES.filter((company) => options.includeDisabled || company.enabled);
   const disabledCompanies = COMPANIES.filter((company) => !company.enabled);
+  const companyShard = normalizeCompanyShard(options.companyShard, options.companyShards);
+  const companies = companyShard
+    ? allCompanies.filter((_, index) => index % companyShard.total === companyShard.index)
+    : allCompanies;
   const companyResults = await mapWithConcurrency(
     companies,
     COMPANY_FETCH_CONCURRENCY,
@@ -327,7 +354,9 @@ async function runLatestJobsTest(env, options = {}) {
     startedAt,
     finishedAt: new Date().toISOString(),
     checkedCompanies: companies.length,
+    totalCompanies: allCompanies.length,
     disabledCompanies: options.includeDisabled ? 0 : disabledCompanies.length,
+    companyShard,
     latestJobsCount: latestJobs.length,
     noJobs,
     failures,
@@ -905,7 +934,10 @@ function summarizeRun(run) {
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     checkedCompanies: run.checkedCompanies,
+    totalEnabledCompanies: run.totalEnabledCompanies,
     disabledCompanies: run.disabledCompanies,
+    companyShard: run.companyShard,
+    saveSeen: run.saveSeen,
     totalJobsFound: run.totalJobsFound,
     londonJobsFound: run.londonJobsFound,
     firstSeenJobs: run.firstSeenJobs,
@@ -973,4 +1005,49 @@ function formatDateForMessage(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toISOString().slice(0, 10);
+}
+
+function scheduledCompanyShard(scheduledTime) {
+  const timestamp = Number(scheduledTime) || Date.now();
+  const scheduledDate = new Date(timestamp);
+  const utcHour = scheduledDate.getUTCHours();
+  return utcHour % SCHEDULED_COMPANY_SHARDS;
+}
+
+function parseShardSearchParams(searchParams) {
+  const shardValue = searchParams.get('shard');
+  const shardsValue = searchParams.get('shards');
+
+  if (shardValue == null && shardsValue == null) return {};
+
+  const companyShards = shardsValue == null ? SCHEDULED_COMPANY_SHARDS : Number(shardsValue);
+  const companyShard = Number(shardValue);
+  const normalized = normalizeCompanyShard(companyShard, companyShards);
+  if (!normalized) {
+    throw new Error('shard and shards must be integers where 0 <= shard < shards');
+  }
+
+  return {
+    companyShard: normalized.index,
+    companyShards: normalized.total,
+  };
+}
+
+function normalizeCompanyShard(companyShard, companyShards) {
+  if (companyShard == null && companyShards == null) return null;
+
+  const total = Number(companyShards || SCHEDULED_COMPANY_SHARDS);
+  const index = Number(companyShard);
+
+  if (
+    !Number.isInteger(total)
+    || !Number.isInteger(index)
+    || total < 1
+    || index < 0
+    || index >= total
+  ) {
+    return null;
+  }
+
+  return { index, total };
 }

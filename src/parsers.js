@@ -1016,7 +1016,7 @@ async function fetchHtmlJobs(company) {
     seenUrls.add(link.url);
     jobs.push(
       normalizeJob(company, {
-        id: link.url,
+        id: htmlJobIdentity(link, company.url),
         title: titleFromHtmlLink(link),
         location: locationFromText(link.filterText),
         office: locationFromText(link.filterText),
@@ -1028,6 +1028,10 @@ async function fetchHtmlJobs(company) {
   }
 
   return jobs;
+}
+
+function htmlJobIdentity(link, baseUrl) {
+  return googleCareersLegacyJobId(link.url, baseUrl) || link.url;
 }
 
 function extractLinks(html, baseUrl) {
@@ -1527,6 +1531,7 @@ function canonicalUrl(input, baseUrl) {
   try {
     const url = new URL(input, baseUrl);
     url.hash = '';
+    normalizeGoogleCareersUrl(url);
 
     for (const key of [...url.searchParams.keys()]) {
       if (/^utm_/i.test(key) || key === 'gh_src') {
@@ -1535,6 +1540,39 @@ function canonicalUrl(input, baseUrl) {
     }
 
     return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+function normalizeGoogleCareersUrl(url) {
+  if (!/(^|\.)google\.com$/i.test(url.hostname)) return;
+
+  url.pathname = url.pathname.replace(
+    /^\/about\/careers\/applications\/jobs\/results\/jobs\/results\//i,
+    '/about/careers/applications/jobs/results/',
+  );
+}
+
+function googleCareersLegacyJobId(value, baseUrl) {
+  try {
+    const base = new URL(baseUrl);
+    const url = new URL(value);
+
+    if (!/(^|\.)google\.com$/i.test(base.hostname) || !/(^|\.)google\.com$/i.test(url.hostname)) {
+      return '';
+    }
+
+    if (!base.pathname.startsWith('/about/careers/applications/jobs/results')) {
+      return '';
+    }
+
+    const match = url.pathname.match(/^\/about\/careers\/applications\/jobs\/results\/(.+)$/i);
+    if (!match) return '';
+
+    const legacyUrl = new URL(url.toString());
+    legacyUrl.pathname = `/about/careers/applications/jobs/results/jobs/results/${match[1]}`;
+    return legacyUrl.toString();
   } catch {
     return '';
   }

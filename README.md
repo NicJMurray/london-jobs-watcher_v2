@@ -1,10 +1,11 @@
 # london-jobs-watcher
 
-A Cloudflare Worker that runs every two hours, checks configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs.
+A Cloudflare Worker that runs every hour, checks a shard of configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs.
 
 ## What It Does
 
-- Runs on a Cloudflare Workers cron schedule: `0 */2 * * *`
+- Runs on a Cloudflare Workers cron schedule: `0 * * * *`
+- Splits scheduled company checks into shards to stay under Cloudflare Workers subrequest limits
 - Checks companies listed in [src/companies.js](src/companies.js)
 - Supports Greenhouse, Lever, Ashby, Workday, iCIMS, Paradox, and a basic fetch-based HTML fallback
 - Stores seen jobs in KV binding `SEEN_JOBS` under key `seen-jobs-v1`
@@ -127,10 +128,22 @@ Send one latest parsed London job per enabled company as a Telegram test digest:
 curl http://localhost:8787/test-latest-jobs
 ```
 
+Send one latest parsed London job for a single company shard:
+
+```bash
+curl "http://localhost:8787/test-latest-jobs?shard=0&shards=3"
+```
+
 Run the watcher manually and send a Telegram update:
 
 ```bash
 curl http://localhost:8787/run-now
+```
+
+Run one company shard manually:
+
+```bash
+curl "http://localhost:8787/run-now?shard=0&shards=3"
 ```
 
 Run the watcher without sending Telegram:
@@ -140,6 +153,12 @@ curl "http://localhost:8787/run-now?notify=false"
 ```
 
 This still records first-seen jobs in KV. Use it when you want to seed the dedupe list without sending an initial batch of existing jobs.
+
+Inspect a run without sending Telegram or saving first-seen jobs:
+
+```bash
+curl "http://localhost:8787/run-now?notify=false&save=false&shard=0&shards=3"
+```
 
 Preview birthday reminders without sending Telegram:
 
@@ -176,7 +195,7 @@ After replacing the KV namespace IDs in [wrangler.jsonc](wrangler.jsonc):
 npm run deploy
 ```
 
-The deployed Worker will run every two hours from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
+The deployed Worker will run every hour from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
 
 ## GitHub Actions Deploy
 
@@ -209,9 +228,10 @@ Use the Worker URL printed by Wrangler or shown in Cloudflare. The script regist
 
 - `GET /health` returns `OK`
 - `GET or POST /test-telegram` sends a Telegram test message
-- `GET or POST /test-latest-jobs` sends one latest parsed London job per enabled company without changing KV
-- `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found, or when every enabled company fails
+- `GET or POST /test-latest-jobs` sends one latest parsed London job per enabled company without changing KV; add `shard=0&shards=3` to test one shard
+- `GET or POST /run-now` checks companies immediately and sends a Telegram update only when new London jobs are found, or when every enabled company fails; add `shard=0&shards=3` to run one shard
 - `GET /run-now?notify=false` checks companies without sending Telegram
+- `GET /run-now?notify=false&save=false` checks companies without sending Telegram or updating KV
 - `GET or POST /run-birthday-reminders` sends due birthday and anniversary reminders
 - `GET /run-birthday-reminders?date=YYYY-MM-DD&notify=false` previews birthday reminders for a date without sending Telegram
 - `POST /telegram-webhook` handles Telegram slash commands from the configured chat
@@ -247,7 +267,7 @@ For non-birthdays, add a `kind`:
 { name: 'Parents', date: '05/10', kind: 'anniversary' }
 ```
 
-The Worker runs every two hours for jobs, but birthday reminders are sent only once during the `08:00` hour in `Europe/London`. Sent birthday reminders are recorded in KV under `birthday-reminders-v1` so repeated cron runs do not send duplicates.
+The Worker runs hourly for jobs, but each scheduled run checks one company shard. Birthday reminders are sent only once during the `08:00` hour in `Europe/London`. Sent birthday reminders are recorded in KV under `birthday-reminders-v1` so repeated cron runs do not send duplicates.
 
 Editing `src/birthdays.js` in GitHub updates the deployed Worker after the `main` branch deploy finishes. The GitHub Actions deploy starts automatically on pushes to `main`.
 
