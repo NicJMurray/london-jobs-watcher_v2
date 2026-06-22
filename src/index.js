@@ -8,6 +8,7 @@ const BIRTHDAY_REMINDER_TIME_ZONE = 'Europe/London';
 const BIRTHDAY_REMINDER_HOUR = 8;
 const MAX_DEBUG_JOBS = 100;
 const MAX_PUBLIC_SCRAPER_JOBS = 5000;
+const PUBLIC_SCRAPER_WINDOW_DAYS = 30;
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3900;
 const COMPANY_FETCH_CONCURRENCY = 6;
 const SCHEDULED_COMPANY_SHARDS = 3;
@@ -33,6 +34,10 @@ export default {
         return jsonResponse({
           ok: true,
           generatedAt: new Date().toISOString(),
+          scope: {
+            location: 'London',
+            days: PUBLIC_SCRAPER_WINDOW_DAYS,
+          },
           count: jobs.length,
           jobs,
         });
@@ -123,6 +128,7 @@ async function scraperPageResponse(env) {
 
 async function loadPublicScraperJobs(env) {
   const seenStore = await loadSeenStore(env);
+  const now = new Date();
 
   return Object.values(seenStore.jobs)
     .map((job) => ({
@@ -130,10 +136,13 @@ async function loadPublicScraperJobs(env) {
       company: String(job.company || ''),
       title: String(job.title || 'Untitled entry'),
       location: String(job.location || ''),
+      office: String(job.office || ''),
       url: String(job.url || ''),
       postedAt: String(job.postedAt || ''),
+      london: typeof job.london === 'boolean' ? job.london : null,
+      telegramSentAt: String(job.telegramSentAt || ''),
     }))
-    .filter((job) => job.company && job.title && job.url)
+    .filter((job) => shouldShowPublicScraperJob(job, now))
     .sort((a, b) => {
       const byFirstSeen = timestampFromDate(b.firstSeenAt) - timestampFromDate(a.firstSeenAt);
       if (byFirstSeen) return byFirstSeen;
@@ -141,7 +150,25 @@ async function loadPublicScraperJobs(env) {
       const byCompany = a.company.localeCompare(b.company);
       return byCompany || a.title.localeCompare(b.title);
     })
+    .map(({ london, office, telegramSentAt, ...job }) => job)
     .slice(0, MAX_PUBLIC_SCRAPER_JOBS);
+}
+
+function shouldShowPublicScraperJob(job, now) {
+  if (!job.company || !job.title || !job.url) return false;
+
+  const firstSeenTimestamp = timestampFromDate(job.firstSeenAt);
+  if (!firstSeenTimestamp) return false;
+
+  const windowStart = now.getTime() - PUBLIC_SCRAPER_WINDOW_DAYS * DAY_MS;
+  if (firstSeenTimestamp < windowStart) return false;
+
+  if (job.telegramSentAt) return true;
+
+  const matchesLondon = job.london === true || (job.london !== false && isLondonJob(job));
+  if (!matchesLondon) return false;
+
+  return !staleAlertReason(job, new Date(firstSeenTimestamp));
 }
 
 function renderScraperPage(jobs) {
@@ -154,9 +181,9 @@ function renderScraperPage(jobs) {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Scraper | Nic</title>
-    <meta name="description" content="A chronological company scrape log." />
+    <meta name="description" content="A London-only 30-day company scrape log." />
     <meta property="og:title" content="Scraper" />
-    <meta property="og:description" content="A chronological company scrape log." />
+    <meta property="og:description" content="A London-only 30-day company scrape log." />
     <meta property="og:type" content="website" />
     <meta name="theme-color" content="#f4f6f3" />
     <style>
@@ -488,7 +515,7 @@ function renderScraperPage(jobs) {
         </div>
         <p class="summary">
           <strong>${jobs.length.toLocaleString('en-GB')}</strong>
-          chronological company records
+          London company records, last ${PUBLIC_SCRAPER_WINDOW_DAYS} days
         </p>
       </section>
 
@@ -507,12 +534,12 @@ function renderScraperPage(jobs) {
       </section>
 
       <div class="meta-row">
-        <span id="result-count">${jobs.length.toLocaleString('en-GB')} records</span>
-        <span>Updated ${escapeHtml(formatPublicDateTime(generatedAt))}</span>
+        <span id="result-count">${jobs.length.toLocaleString('en-GB')} London records</span>
+        <span>Last ${PUBLIC_SCRAPER_WINDOW_DAYS} days &middot; Updated ${escapeHtml(formatPublicDateTime(generatedAt))}</span>
       </div>
 
       <section id="list" class="list" aria-live="polite"></section>
-      <p id="empty" class="empty" aria-hidden="true">No matching records.</p>
+      <p id="empty" class="empty" aria-hidden="true">No matching London records.</p>
 
       <footer>
         <a href="/">&copy; <span id="year"></span> Nic Murray</a>
@@ -562,7 +589,7 @@ function renderScraperPage(jobs) {
           return companyMatch && (!query || haystack.includes(query));
         });
 
-        resultCount.textContent = visible.length.toLocaleString("en-GB") + (visible.length === 1 ? " record" : " records");
+        resultCount.textContent = visible.length.toLocaleString("en-GB") + (visible.length === 1 ? " London record" : " London records");
         empty.setAttribute("aria-hidden", String(visible.length !== 0));
         list.innerHTML = visible.map((job) => \`
           <article class="entry">
@@ -674,9 +701,11 @@ async function runWatcher(env, options = {}) {
         company: job.company,
         title: job.title,
         location: job.location || job.office || '',
+        office: job.office || '',
         url: job.url,
         postedAt: job.postedAt || '',
         closingAt: job.closingAt || '',
+        london: londonJob,
       };
 
       if (londonJob) {
@@ -694,6 +723,7 @@ async function runWatcher(env, options = {}) {
         }
 
         run.newLondonJobs.push({
+          key: job.key,
           company: job.company,
           title: job.title,
           location: job.location || job.office || 'Location not listed',
@@ -719,6 +749,7 @@ async function runWatcher(env, options = {}) {
           await sendTelegramMessage(env, message);
         }
         run.notification.sent = true;
+        markTelegramSentJobs(seenJobs, run.newLondonJobs);
       } catch (error) {
         run.notification.error = errorMessage(error);
         console.error('Telegram notification failed', error);
@@ -740,6 +771,15 @@ async function runWatcher(env, options = {}) {
   console.log(`Run finished: ${run.newLondonJobs.length} new London jobs, ${run.failures.length} failures`);
 
   return run;
+}
+
+function markTelegramSentJobs(seenJobs, jobs) {
+  const sentAt = new Date().toISOString();
+
+  for (const job of jobs) {
+    if (!job.key || !seenJobs[job.key]) continue;
+    seenJobs[job.key].telegramSentAt = sentAt;
+  }
 }
 
 async function shouldAlertNewLondonJob(job, runStartedAt) {
