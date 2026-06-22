@@ -4,6 +4,16 @@
   "main": "src/index.js",
   "compatibility_date": "2026-05-04",
   "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "njmurray.com/scraper*",
+      "zone_name": "njmurray.com"
+    },
+    {
+      "pattern": "www.njmurray.com/scraper*",
+      "zone_name": "njmurray.com"
+    }
+  ],
   "triggers": {
     "crons": ["0 * * * *"]
   },

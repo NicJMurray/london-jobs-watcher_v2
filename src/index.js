@@ -7,6 +7,7 @@ const BIRTHDAY_REMINDER_KV_KEY = 'birthday-reminders-v1';
 const BIRTHDAY_REMINDER_TIME_ZONE = 'Europe/London';
 const BIRTHDAY_REMINDER_HOUR = 8;
 const MAX_DEBUG_JOBS = 100;
+const MAX_PUBLIC_SCRAPER_JOBS = 5000;
 const MAX_TELEGRAM_MESSAGE_LENGTH = 3900;
 const COMPANY_FETCH_CONCURRENCY = 6;
 const SCHEDULED_COMPANY_SHARDS = 3;
@@ -21,6 +22,20 @@ export default {
     try {
       if (request.method === 'GET' && url.pathname === '/health') {
         return textResponse('OK');
+      }
+
+      if (request.method === 'GET' && ['/scraper', '/scraper/'].includes(url.pathname)) {
+        return scraperPageResponse(env);
+      }
+
+      if (request.method === 'GET' && url.pathname === '/scraper.json') {
+        const jobs = await loadPublicScraperJobs(env);
+        return jsonResponse({
+          ok: true,
+          generatedAt: new Date().toISOString(),
+          count: jobs.length,
+          jobs,
+        });
       }
 
       if (['GET', 'POST'].includes(request.method) && url.pathname === '/test-telegram') {
@@ -96,6 +111,481 @@ export default {
     ctx.waitUntil(runScheduledTasks(env, { scheduledTime: event.scheduledTime }));
   },
 };
+
+async function scraperPageResponse(env) {
+  const jobs = await loadPublicScraperJobs(env);
+  return htmlResponse(renderScraperPage(jobs), {
+    headers: {
+      'cache-control': 'public, max-age=300',
+    },
+  });
+}
+
+async function loadPublicScraperJobs(env) {
+  const seenStore = await loadSeenStore(env);
+
+  return Object.values(seenStore.jobs)
+    .map((job) => ({
+      firstSeenAt: String(job.firstSeenAt || ''),
+      company: String(job.company || ''),
+      title: String(job.title || 'Untitled entry'),
+      location: String(job.location || ''),
+      url: String(job.url || ''),
+      postedAt: String(job.postedAt || ''),
+    }))
+    .filter((job) => job.company && job.title && job.url)
+    .sort((a, b) => {
+      const byFirstSeen = timestampFromDate(b.firstSeenAt) - timestampFromDate(a.firstSeenAt);
+      if (byFirstSeen) return byFirstSeen;
+
+      const byCompany = a.company.localeCompare(b.company);
+      return byCompany || a.title.localeCompare(b.title);
+    })
+    .slice(0, MAX_PUBLIC_SCRAPER_JOBS);
+}
+
+function renderScraperPage(jobs) {
+  const companies = uniqueStrings(jobs.map((job) => job.company)).sort((a, b) => a.localeCompare(b));
+  const generatedAt = new Date().toISOString();
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scraper | Nic</title>
+    <meta name="description" content="A chronological company scrape log." />
+    <meta property="og:title" content="Scraper" />
+    <meta property="og:description" content="A chronological company scrape log." />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#f4f6f3" />
+    <style>
+      :root {
+        --paper: #f4f6f3;
+        --surface: #fffef9;
+        --ink: #171a1f;
+        --muted: #66716b;
+        --line: #cfd8d0;
+        --green: #174f43;
+        --green-dark: #0f3932;
+        --blue: #284f8f;
+        --red: #b5483c;
+        --gold: #c18426;
+        --shadow: 0 18px 44px rgba(23, 26, 31, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+        background: var(--paper);
+      }
+
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(90deg, rgba(23, 79, 67, 0.08) 1px, transparent 1px),
+          linear-gradient(rgba(40, 79, 143, 0.055) 1px, transparent 1px),
+          var(--paper);
+        background-size: 44px 44px;
+        font: 16px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .shell {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 28px 0 56px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        min-height: 48px;
+        padding-bottom: 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .wordmark {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 800;
+      }
+
+      .mark {
+        display: grid;
+        width: 30px;
+        height: 30px;
+        place-items: center;
+        border: 1px solid var(--green);
+        border-radius: 8px;
+        color: var(--surface);
+        background: var(--green);
+        font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+      }
+
+      nav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      nav a {
+        border-bottom: 1px solid transparent;
+      }
+
+      nav a:hover {
+        color: var(--ink);
+        border-bottom-color: currentColor;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        padding: 58px 0 34px;
+      }
+
+      .eyebrow {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 0.8rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 740px;
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+        font-size: clamp(3rem, 9vw, 6.8rem);
+        line-height: 0.92;
+        font-weight: 800;
+      }
+
+      .summary {
+        width: min(300px, 100%);
+        color: var(--muted);
+      }
+
+      .summary strong {
+        display: block;
+        color: var(--ink);
+        font-size: 2rem;
+        line-height: 1.1;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) minmax(180px, 260px);
+        gap: 14px;
+        align-items: end;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 254, 249, 0.78);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(10px);
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      input,
+      select {
+        width: 100%;
+        height: 44px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0 12px;
+        color: var(--ink);
+        background: var(--surface);
+        font: inherit;
+      }
+
+      input:focus,
+      select:focus {
+        outline: 3px solid rgba(193, 132, 38, 0.24);
+        border-color: var(--gold);
+      }
+
+      .meta-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin: 26px 0 14px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .entry {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 20px;
+        min-height: 118px;
+        padding: 18px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 254, 249, 0.9);
+        box-shadow: 0 12px 26px rgba(23, 26, 31, 0.05);
+      }
+
+      .entry::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 5px;
+        background: linear-gradient(180deg, var(--green), var(--blue));
+      }
+
+      .entry h2 {
+        margin: 4px 0 8px;
+        font-size: 1.08rem;
+        line-height: 1.35;
+      }
+
+      .company {
+        margin: 0;
+        color: var(--green-dark);
+        font-weight: 800;
+      }
+
+      .detail {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .date {
+        display: grid;
+        align-content: start;
+        justify-items: end;
+        gap: 8px;
+        min-width: 138px;
+        color: var(--muted);
+        font-size: 0.9rem;
+        text-align: right;
+      }
+
+      .date a {
+        color: var(--blue);
+        font-weight: 800;
+        border-bottom: 1px solid rgba(40, 79, 143, 0.28);
+      }
+
+      .empty {
+        display: none;
+        padding: 32px 18px;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        background: rgba(255, 254, 249, 0.62);
+        text-align: center;
+      }
+
+      .empty[aria-hidden="false"] {
+        display: block;
+      }
+
+      footer {
+        margin-top: 46px;
+        padding-top: 24px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 760px) {
+        .shell {
+          width: min(100% - 28px, 1120px);
+          padding-top: 18px;
+        }
+
+        .topbar,
+        .hero,
+        .entry,
+        .meta-row {
+          grid-template-columns: 1fr;
+        }
+
+        .topbar,
+        .meta-row {
+          align-items: flex-start;
+        }
+
+        nav {
+          flex-wrap: wrap;
+          gap: 10px 14px;
+        }
+
+        .hero {
+          padding-top: 38px;
+        }
+
+        .controls {
+          grid-template-columns: 1fr;
+          padding: 14px;
+        }
+
+        .date {
+          justify-items: start;
+          min-width: 0;
+          text-align: left;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="wordmark" href="/" aria-label="njmurray homepage">
+          <span class="mark" aria-hidden="true">N</span>
+          <span>Nic Murray</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="/">Home</a>
+          <a href="/books/">Books</a>
+          <a href="/playlist/">Playlist Finder</a>
+          <a href="/playlists/">Playlists</a>
+          <a href="/gutenberg/">Rare Words</a>
+        </nav>
+      </header>
+
+      <section class="hero" aria-labelledby="scraper-title">
+        <div>
+          <p class="eyebrow">Tech</p>
+          <h1 id="scraper-title">Scraper</h1>
+        </div>
+        <p class="summary">
+          <strong>${jobs.length.toLocaleString('en-GB')}</strong>
+          chronological company records
+        </p>
+      </section>
+
+      <section class="controls" aria-label="Filters">
+        <label>
+          Keyword
+          <input id="search" type="search" autocomplete="off" placeholder="Search title, company, location" />
+        </label>
+        <label>
+          Company
+          <select id="company">
+            <option value="">All companies</option>
+            ${companies.map((company) => `<option value="${escapeHtml(company)}">${escapeHtml(company)}</option>`).join('')}
+          </select>
+        </label>
+      </section>
+
+      <div class="meta-row">
+        <span id="result-count">${jobs.length.toLocaleString('en-GB')} records</span>
+        <span>Updated ${escapeHtml(formatPublicDateTime(generatedAt))}</span>
+      </div>
+
+      <section id="list" class="list" aria-live="polite"></section>
+      <p id="empty" class="empty" aria-hidden="true">No matching records.</p>
+
+      <footer>
+        <a href="/">&copy; <span id="year"></span> Nic Murray</a>
+      </footer>
+    </main>
+
+    <script id="scrape-data" type="application/json">${jsonForHtml(jobs)}</script>
+    <script>
+      const jobs = JSON.parse(document.getElementById("scrape-data").textContent);
+      const list = document.getElementById("list");
+      const empty = document.getElementById("empty");
+      const search = document.getElementById("search");
+      const company = document.getElementById("company");
+      const resultCount = document.getElementById("result-count");
+      const formatter = new Intl.DateTimeFormat("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      document.getElementById("year").textContent = new Date().getFullYear();
+
+      function formatDate(value) {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "Date unknown";
+        return formatter.format(date);
+      }
+
+      function escapeText(value) {
+        return String(value || "").replace(/[&<>"']/g, (character) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          "\\"": "&quot;",
+          "'": "&#39;",
+        }[character]));
+      }
+
+      function render() {
+        const query = search.value.trim().toLowerCase();
+        const companyValue = company.value;
+        const visible = jobs.filter((job) => {
+          const companyMatch = !companyValue || job.company === companyValue;
+          const haystack = [job.title, job.company, job.location].join(" ").toLowerCase();
+          return companyMatch && (!query || haystack.includes(query));
+        });
+
+        resultCount.textContent = visible.length.toLocaleString("en-GB") + (visible.length === 1 ? " record" : " records");
+        empty.setAttribute("aria-hidden", String(visible.length !== 0));
+        list.innerHTML = visible.map((job) => \`
+          <article class="entry">
+            <div>
+              <p class="company">\${escapeText(job.company)}</p>
+              <h2>\${escapeText(job.title)}</h2>
+              <p class="detail">\${escapeText(job.location || "Location not listed")}</p>
+            </div>
+            <div class="date">
+              <time datetime="\${escapeText(job.firstSeenAt)}">\${escapeText(formatDate(job.firstSeenAt))}</time>
+              <a href="\${escapeText(job.url)}" rel="noreferrer" target="_blank">Open</a>
+            </div>
+          </article>
+        \`).join("");
+      }
+
+      search.addEventListener("input", render);
+      company.addEventListener("change", render);
+      render();
+    </script>
+  </body>
+</html>`;
+}
 
 async function runScheduledTasks(env, options = {}) {
   const companyShard = scheduledCompanyShard(options.scheduledTime);
@@ -984,6 +1474,65 @@ function textResponse(text, init = {}) {
       ...init.headers,
     },
   });
+}
+
+function htmlResponse(html, init = {}) {
+  return new Response(html, {
+    ...init,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      ...init.headers,
+    },
+  });
+}
+
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]);
+}
+
+function jsonForHtml(value) {
+  return JSON.stringify(value).replace(/[<>&]/g, (character) => ({
+    '<': '\\u003c',
+    '>': '\\u003e',
+    '&': '\\u0026',
+  })[character]);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+
+  for (const value of values) {
+    const item = String(value || '').trim();
+    const key = item.toLowerCase();
+    if (!item || seen.has(key)) continue;
+
+    seen.add(key);
+    result.push(item);
+  }
+
+  return result;
+}
+
+function formatPublicDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: BIRTHDAY_REMINDER_TIME_ZONE,
+    timeZoneName: 'short',
+  }).format(date);
 }
 
 function clampNumber(value, min, max) {
