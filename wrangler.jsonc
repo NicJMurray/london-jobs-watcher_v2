@@ -6,12 +6,8 @@
   "workers_dev": true,
   "routes": [
     {
-      "pattern": "njmurray.com/scraper*",
-      "zone_name": "njmurray.com"
-    },
-    {
-      "pattern": "www.njmurray.com/scraper*",
-      "zone_name": "njmurray.com"
+      "pattern": "scraper.njmurray.com",
+      "custom_domain": true
     }
   ],
   "triggers": {

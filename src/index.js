@@ -25,7 +25,7 @@ export default {
         return textResponse('OK');
       }
 
-      if (request.method === 'GET' && ['/scraper', '/scraper/'].includes(url.pathname)) {
+      if (request.method === 'GET' && ['/', '/scraper', '/scraper/'].includes(url.pathname)) {
         return scraperPageResponse(env);
       }
 
@@ -495,16 +495,17 @@ function renderScraperPage(jobs) {
   <body>
     <main class="shell">
       <header class="topbar">
-        <a class="wordmark" href="/" aria-label="njmurray homepage">
+        <a class="wordmark" href="https://njmurray.com/" aria-label="njmurray homepage">
           <span class="mark" aria-hidden="true">N</span>
           <span>Nic Murray</span>
         </a>
         <nav aria-label="Primary navigation">
-          <a href="/">Home</a>
-          <a href="/books/">Books</a>
-          <a href="/playlist/">Playlist Finder</a>
-          <a href="/playlists/">Playlists</a>
-          <a href="/gutenberg/">Rare Words</a>
+          <a href="https://njmurray.com/">Home</a>
+          <a href="https://books.njmurray.com">Books</a>
+          <a href="https://playlist.njmurray.com">Playlist Finder</a>
+          <a href="https://playlists.njmurray.com">Playlists</a>
+          <a href="https://rare-words.njmurray.com">Rare Words</a>
+          <a href="https://github.com/NicJMurray" rel="noopener" target="_blank">GitHub</a>
         </nav>
       </header>
 
@@ -542,7 +543,7 @@ function renderScraperPage(jobs) {
       <p id="empty" class="empty" aria-hidden="true">No matching London records.</p>
 
       <footer>
-        <a href="/">&copy; <span id="year"></span> Nic Murray</a>
+        <a href="https://njmurray.com/">&copy; <span id="year"></span> Nic Murray</a>
       </footer>
     </main>
 

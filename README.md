@@ -2,6 +2,8 @@
 
 A Cloudflare Worker that runs every hour, checks a shard of configured company careers pages/APIs for London jobs, stores already-seen jobs in Cloudflare KV, and sends Telegram updates for newly discovered London jobs.
 
+Canonical URL: `https://scraper.njmurray.com`.
+
 ## What It Does
 
 - Runs on a Cloudflare Workers cron schedule: `0 * * * *`
@@ -197,6 +199,8 @@ npm run deploy
 
 The deployed Worker will run every hour from the cron trigger in [wrangler.jsonc](wrangler.jsonc).
 
+The public scraper page is served from `https://scraper.njmurray.com/`.
+
 ## GitHub Actions Deploy
 
 The workflow is in [.github/workflows/deploy.yml](.github/workflows/deploy.yml). It deploys on pushes to `main` and can also be run manually.
@@ -219,10 +223,12 @@ npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 After the Worker is deployed, register the Telegram webhook once:
 
 ```bash
-npm run telegram:webhook -- https://your-worker-url
+npm run telegram:webhook -- https://scraper.njmurray.com
 ```
 
-Use the Worker URL printed by Wrangler or shown in Cloudflare. The script registers `/telegram-webhook` and publishes the `/birthdays` and `/events` bot commands.
+The script registers `/telegram-webhook` and publishes the `/birthdays` and `/events` bot commands.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the canonical URL, Worker name, and required secrets.
 
 ## Endpoints
 
