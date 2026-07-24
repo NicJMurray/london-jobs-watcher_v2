@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">London Jobs Watcher</title>
+  <desc id="desc">Project banner for the London careers monitoring and alert system.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#cfd8d0" stroke-width="1" opacity=".55"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="320" fill="#f4f6f3"/>
+  <rect width="1200" height="320" fill="url(#grid)"/>
+  <rect x="64" y="48" width="48" height="48" rx="10" fill="#0f3932"/>
+  <text x="88" y="81" text-anchor="middle" fill="#fffef9" font-family="Georgia, serif" font-size="25" font-weight="700">N</text>
+  <text x="64" y="139" fill="#66716b" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="3">AUTOMATION / DATA</text>
+  <text x="64" y="207" fill="#171a1f" font-family="Georgia, serif" font-size="54" font-weight="500">London Jobs Watcher</text>
+  <text x="66" y="249" fill="#66716b" font-family="Inter, Arial, sans-serif" font-size="20">scraper.njmurray.com</text>
+  <path d="M910 221h238M930 176h198M950 131h158M970 86h118" stroke="#0f3932" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="910" cy="221" r="9" fill="#b5483c"/>
+  <circle cx="930" cy="176" r="9" fill="#c18426"/>
+  <circle cx="950" cy="131" r="9" fill="#284f8f"/>
+  <circle cx="970" cy="86" r="9" fill="#174f43"/>
+  <rect y="310" width="1200" height="10" fill="#0f3932"/>
+</svg>
