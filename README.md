@@ -1,3 +1,5 @@
+![London Jobs Watcher](.github/readme-banner.svg)
+
 # London Jobs Watcher
 
 Cloudflare Worker at `scraper.njmurray.com` for monitoring selected careers sources, identifying newly discovered London roles, recording discovery history, and sending Telegram alerts. The same Worker also serves a 30-day public scrape log and runs birthday/anniversary reminders.
