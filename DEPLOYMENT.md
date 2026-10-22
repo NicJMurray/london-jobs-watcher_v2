@@ -1,28 +1,41 @@
 # Deployment
 
-- Repo: `NicJMurray/london-jobs-watcher_v2`
-- Purpose: London jobs scraper Worker with KV dedupe, cron checks, public scrape log, and Telegram alerts
-- Canonical URL: `https://scraper.njmurray.com`
-- Cloudflare type: Worker
-- Cloudflare Worker name: `london-jobs-watcher`
-- Deploy method: GitHub Actions + Wrangler
-- Local/manual deploy command: `npm run deploy`
-- Wrangler command: `wrangler deploy`
+| Setting | Value |
+| --- | --- |
+| Repository | `NicJMurray/london-jobs-watcher_v2` |
+| Production branch | `main` |
+| Live application | <https://scraper.njmurray.com> |
+| Cloudflare Worker | `london-jobs-watcher` |
+| Configuration | `wrangler.jsonc` in the repository root |
+| Worker entry point | `src/index.js` |
+| Install | `npm ci` |
+| Build | No separate build step |
+| Deploy | `npx wrangler deploy` |
 
-## GitHub Actions
+## GitHub to Cloudflare
 
-This repo is a Worker project, so it keeps the Wrangler GitHub Actions workflow.
+Pushing `main` runs `.github/workflows/deploy.yml`, which installs locked dependencies, and publishes this Worker through Wrangler. The workflow targets the known Cloudflare account directly and requires only `CLOUDFLARE_API_TOKEN` as a repository secret. A missing token fails explicitly.
 
-Pushing to `main` deploys through `.github/workflows/deploy.yml`.
+The pipeline is **configured, awaiting successful credential validation and production verification**. The previous deployment failed at Wrangler; a green production page alone does not prove the current commit was published. Deployment concurrency prevents overlapping releases.
 
-GitHub repository secrets are required for the Cloudflare account ID and API token.
+## Editing and publishing
 
-Worker bindings and schedules are configured in `wrangler.jsonc`:
+1. Edit this repository; update `README.md` when routes, parser behaviour, or scheduling changes.
+2. Run `npm ci` and syntax-check affected JavaScript. Use read-only parser diagnostics when required by a parser change.
+3. Commit and push checked source to `main`.
+4. Follow the Cloudflare build for that exact commit, then verify `/health` and the public page.
 
-- KV binding: `SEEN_JOBS`
-- Cron: `0 * * * *`
+`npm run deploy` is the manual fallback using the local Cloudflare sign-in. A manual upload does not verify Git-triggered publication.
 
-Cloudflare Worker secrets to set with Wrangler:
+The homepage links to this independent application. Its existing link opens the most recent successful production deployment.
+
+## State, schedules, and secrets
+
+Preserve the current production `SEEN_JOBS` namespace ID from `wrangler.jsonc`; replacing the namespace would lose deduplication history and reminder state. Keep the preview namespace distinct.
+
+The cron is `0 * * * *` UTC. The application divides company checks into three hourly shards and independently evaluates reminders at its configured London time.
+
+These are runtime Cloudflare Worker secrets, not ordinary build variables:
 
 ```text
 TELEGRAM_BOT_TOKEN
@@ -30,8 +43,8 @@ TELEGRAM_CHAT_ID
 TELEGRAM_WEBHOOK_SECRET
 ```
 
-The existing KV namespace IDs and preview IDs are kept in `wrangler.jsonc`.
+Code deployments must retain existing secrets. Do not expose them in source, logs, or documentation.
 
-## Note
+Use `/health`, the public page, or `/scraper.json` for normal deployment verification. Manual notification routes can send Telegram messages or change KV. A diagnostic watcher run must explicitly set `notify=false&save=false`; do not call notification test routes without authorization to send messages.
 
-The static Pages repos use Cloudflare Git integration and do not need GitHub Actions deploy workflows. This Worker repo is different and still uses Wrangler.
+Preserve the `scraper.njmurray.com` custom domain, Worker name, compatibility date, hourly schedule, and runtime bindings unless the task requires coordinated changes.
