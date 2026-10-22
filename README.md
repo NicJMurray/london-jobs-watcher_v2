@@ -359,3 +359,8 @@ Useful query parameters:
 - A stable source ID is more important than a pretty URL because it controls de-duplication.
 - KV stores the complete seen history as one JSON object. This is simple but will eventually need partitioning if the history becomes very large.
 - The public page reflects first discovery, not continuous proof that every role is still open.
+
+
+## Updating and publishing
+
+The live app is https://scraper.njmurray.com/. Make changes in this repository, run its checks, and push to `main`. GitHub Actions publishes the change to Cloudflare automatically after a successful build. See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact commands, resources, and production checks.

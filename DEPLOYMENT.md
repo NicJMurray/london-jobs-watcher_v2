@@ -16,14 +16,14 @@
 
 Pushing `main` runs `.github/workflows/deploy.yml`, which installs locked dependencies, and publishes this Worker through Wrangler. The workflow targets the known Cloudflare account directly and requires only `CLOUDFLARE_API_TOKEN` as a repository secret. A missing token fails explicitly.
 
-The pipeline is **configured, awaiting successful credential validation and production verification**. The previous deployment failed at Wrangler; a green production page alone does not prove the current commit was published. Deployment concurrency prevents overlapping releases.
+The pipeline was verified on 23 October 2026 with a successful GitHub Actions deployment to the existing production Worker. The deployment token is stored as an encrypted repository secret; it must never be added to source. Deployment concurrency prevents overlapping releases. Check the current Actions result and live site for each subsequent change.
 
 ## Editing and publishing
 
 1. Edit this repository; update `README.md` when routes, parser behaviour, or scheduling changes.
 2. Run `npm ci` and syntax-check affected JavaScript. Use read-only parser diagnostics when required by a parser change.
 3. Commit and push checked source to `main`.
-4. Follow the Cloudflare build for that exact commit, then verify `/health` and the public page.
+4. Follow the GitHub Actions deployment for that exact commit, then verify `/health` and the public page.
 
 `npm run deploy` is the manual fallback using the local Cloudflare sign-in. A manual upload does not verify Git-triggered publication.
 
