@@ -23,7 +23,8 @@ test('company list and invalid-company requests do not fetch upstream', async (t
   t.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected source fetch'); });
   const listing = await worker.fetch(new Request(`${url}/check`), {});
   const { companies } = await listing.json();
-  assert.equal(companies.filter((entry) => entry.enabled).length, 29);
+  assert.equal(companies.filter((entry) => entry.enabled).length, 28);
+  assert.equal(companies.find((entry) => entry.slug === 'revolut').enabled, false);
   const missing = await worker.fetch(new Request(`${url}/check?company=bbc`), {});
   assert.equal(missing.status, 400);
 });
@@ -56,6 +57,22 @@ test('public requests cannot turn on notification or KV writes', async () => {
   }
 });
 
+test('routine runs skip Revolut and the three removed companies', async (t) => {
+  const sources = [];
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(globalThis, 'fetch', async (sourceUrl) => {
+    sources.push(sourceUrl);
+    return new Response('Unavailable', { status: 403 });
+  });
+  const response = await worker.fetch(new Request(`${url}/run-now`), {
+    SEEN_JOBS: { async get() { return JSON.stringify({ version: 1, jobs: {} }); }, put: noKv.put },
+  });
+  const result = await response.json();
+  assert.equal(result.checkedCompanies, 28);
+  assert.equal(sources.length, 28);
+  assert.ok(sources.every((source) => !/revolut|bbc|adidas|decathlon|jina\.ai/i.test(source)));
+});
+
 test('failed Telegram delivery leaves new jobs eligible for retry', async (t) => {
   const secret = 'local-test-secret';
   let telegramCalls = 0;
@@ -80,15 +97,18 @@ test('failed Telegram delivery leaves new jobs eligible for retry', async (t) =>
   assert.equal(result.notification.sent, false);
 });
 
-test('removed companies disappear from public results without deleting KV history', async () => {
+test('removed companies are hidden while paused-company history is preserved', async () => {
   const base = { title: 'Engineer', location: 'London', firstSeenAt: new Date().toISOString(), london: true, url: 'https://example.com/job/1' };
-  const jobs = { 'bbc::1': { ...base, company: 'BBC' }, 'spotify::1': { ...base, company: 'Spotify' } };
+  const jobs = {
+    'bbc::1': { ...base, company: 'BBC' }, 'spotify::1': { ...base, company: 'Spotify' },
+    'revolut::1': { ...base, company: 'Revolut' },
+  };
   const response = await worker.fetch(new Request(`${url}/scraper.json`), {
     SEEN_JOBS: { async get() { return JSON.stringify({ version: 1, jobs }); }, put: noKv.put },
   });
   const result = await response.json();
-  assert.deepEqual(result.jobs.map((job) => job.company), ['Spotify']);
-  assert.equal(Object.keys(jobs).length, 2);
+  assert.deepEqual(result.jobs.map((job) => job.company), ['Revolut', 'Spotify']);
+  assert.equal(Object.keys(jobs).length, 3);
 });
 
 test('old notification test routes are gone and webhook authentication fails closed', async () => {

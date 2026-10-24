@@ -141,10 +141,10 @@ async function scraperPageResponse(env) {
 async function loadPublicScraperJobs(env) {
   const seenStore = await loadSeenStore(env);
   const now = new Date();
-  const activeCompanies = new Set(COMPANIES.filter((company) => company.enabled).map((company) => company.name));
+  const configuredCompanies = new Set(COMPANIES.map((company) => company.name));
 
   return Object.values(seenStore.jobs)
-    .filter((job) => activeCompanies.has(job.company))
+    .filter((job) => configuredCompanies.has(job.company))
     .map((job) => ({
       firstSeenAt: String(job.firstSeenAt || ''),
       company: String(job.company || ''),

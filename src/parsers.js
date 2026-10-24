@@ -279,20 +279,10 @@ async function fetchWorkdayJobs(company) {
 }
 
 async function fetchRevolutNextJobs(company) {
-  const snapshot = await fetchJson(company.snapshotUrl);
-  const fetchedAt = new Date(snapshot?.fetchedAt).getTime();
-  const age = Date.now() - fetchedAt;
-  if (!Number.isFinite(fetchedAt) || age > 6 * 60 * 60 * 1000 || age < -5 * 60 * 1000) {
-    throw new Error('Revolut source snapshot is missing or older than six hours; check its GitHub Actions refresh');
-  }
-  if (snapshot.source !== company.url || !Array.isArray(snapshot.positions)) {
-    throw new Error('Invalid Revolut source snapshot');
-  }
-  return snapshot.positions.map((position) => mapRevolutJob(company, position));
+  const html = await fetchText(company.url);
+  return extractRevolutPositions(html).map((position) => mapRevolutJob(company, position));
 }
 
-// Used by the GitHub Actions fetcher and its regression tests. Keep page parsing
-// separate from retrieval: the official page challenges Cloudflare Worker IPs.
 export function extractRevolutPositions(html) {
   const data = extractNextData(html);
   const positions = data?.props?.pageProps?.positions;

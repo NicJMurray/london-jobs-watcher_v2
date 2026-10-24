@@ -146,11 +146,10 @@ export const COMPANIES = [
     name: 'Revolut',
     slug: 'revolut',
     url: 'https://www.revolut.com/careers/',
-    snapshotUrl: 'https://raw.githubusercontent.com/NicJMurray/london-jobs-watcher_v2/source-data/revolut.json',
     careersUrl: 'https://www.revolut.com',
     parserType: 'revolut-next',
-    enabled: true,
-    notes: 'GitHub Actions fetches the official careers page hourly; the Worker reads that snapshot because Revolut challenges Cloudflare IPs. Original position UUIDs are retained.',
+    enabled: false,
+    notes: 'Paused: the official page challenges both Cloudflare Worker and GitHub runner IPs; the old third-party reader is rate-limited. Re-enable only when a reliable fetch-based source is available.',
   },
   {
     name: 'Vinted',

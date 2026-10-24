@@ -16,11 +16,10 @@ The same bot also handles birthday/anniversary reminders and `/birthdays` comman
 
 There is no browser automation, database, queue, or third-party scraping service.
 Most sources use their official recruiting APIs; the remaining ones expose job
-data in their public HTML. Revolut's page blocks Cloudflare Worker IPs, so an
-hourly GitHub Actions job fetches its official page and publishes `revolut.json`
-on the separate `source-data` branch. The Worker reads that public snapshot;
-snapshots older than six hours fail explicitly. Snapshot commits never deploy the
-Worker, and the refresh needs only GitHub's built-in repository token.
+data in their public HTML. Revolut is paused: its page challenges both Cloudflare
+Workers and GitHub runners, and the former third-party reader is rate-limited.
+It needs a reliable fetch-based source before being re-enabled; the bot does not
+attempt browser challenges or maintain a proxy/snapshot pipeline for it.
 
 Network requests have a 45-second timeout covering the
 body as well as the headers. A network failure, HTTP 429, or HTTP 5xx gets at most
@@ -32,7 +31,7 @@ Worker logs are enabled for investigating failures from the scheduled runs.
 
 `src/companies.js` is the watchlist. Each entry provides `name`, `slug`, `url`,
 `parserType`, and `enabled`, with source-specific pagination/location options.
-There are 29 enabled companies and three paused sources. BBC, Adidas, and
+There are 28 enabled companies and four paused sources. BBC, Adidas, and
 Decathlon have been removed from the watchlist and public results; their old KV
 records remain intact for deduplication/history.
 
@@ -41,7 +40,7 @@ Repairs made on 24 October 2026:
 | Company | Cause | Current source |
 | --- | --- | --- |
 | Fujifilm | The Europe iCIMS portal was retired and returned 404. | Workday board linked from [Fujifilm UK careers](https://www.fujifilm.com/uk/en/about/career), searched for London. Zero matching jobs is valid. |
-| Revolut | The third-party reader was rate-limited; direct Worker requests hit a browser challenge. | GitHub Actions fetches the official careers page hourly and publishes a source snapshot. Original UUIDs are preserved. Missing/stale data is a failure, never a silent zero. |
+| Revolut | The third-party reader was rate-limited; both Worker and GitHub runner requests hit a browser challenge. | Paused until a reliable fetch-based source is available. The parser retains original UUIDs; existing job history is preserved. |
 | Microsoft | No HTTP failure reproduced during the review; the three-page cap did omit results. | Official Eightfold API, with one transient retry and up to ten pages. Missing/error payloads and truncated results fail explicitly. |
 | Skyscanner | The old Greenhouse board returns 404. | Official Ashby board used by Skyscanner's current careers page. Unlisted jobs are excluded. |
 
@@ -86,9 +85,10 @@ The old `/test-telegram` and `/test-latest-jobs` routes have been removed.
 - `SEEN_JOBS` stores `seen-jobs-v1`, a versioned JSON object keyed by job identity.
   It includes all discovered jobs, including non-London roles, so an edited
   location does not make an old job appear new.
-- The public log shows active companies' London discoveries from the last 30
+- The public log shows configured companies' London discoveries from the last 30
   days, up to 5,000 records. It is a discovery log, not proof a vacancy is still
-  open. Removed/paused companies are hidden without deleting stored records.
+  open. Removed companies are hidden without deleting stored records; paused
+  companies' existing discoveries remain visible within the usual window.
 - KV remains one JSON object: simple for this bot, but concurrent manual writes
   can conflict with the scheduled run. Use read-only diagnostics routinely.
 
@@ -132,7 +132,6 @@ failure handling, and history preservation.
 | `src/parsers.js` | Source retrieval, normalisation, stable IDs, and London matching. |
 | `src/index.js` | HTTP page/API, cron, deduplication, Telegram, and reminders. |
 | `src/birthdays.js` | Personal dates. |
-| `scripts/refresh-revolut.mjs` | Fetch and validate Revolut's official positions data for the hourly Actions job. |
 | `test/` | Offline regression tests. |
 | `wrangler.jsonc` | Worker, domain, hourly cron, and existing KV bindings. |
 
