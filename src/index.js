@@ -846,10 +846,11 @@ async function runBirthdayReminders(env, options = {}) {
   const allEvents = [
     ...collectBirthdayReminderEvents(BIRTHDAY_EVENTS, localDate, 'today'),
     ...collectBirthdayReminderEvents(BIRTHDAY_EVENTS, addCalendarDays(localDate, 1), 'tomorrow'),
+    ...collectBirthdayReminderEvents(BIRTHDAY_EVENTS, addCalendarDays(localDate, 7), 'week'),
   ];
 
   if (allEvents.length === 0) {
-    result.skippedReason = 'no birthdays or anniversaries today or tomorrow';
+    result.skippedReason = 'no birthdays or anniversaries today, tomorrow, or in one week';
     result.finishedAt = new Date().toISOString();
     return result;
   }
@@ -1229,6 +1230,7 @@ function birthdayEventLabel(event) {
 function formatBirthdayReminderMessage(events) {
   const todayEvents = events.filter((event) => event.timing === 'today');
   const tomorrowEvents = events.filter((event) => event.timing === 'tomorrow');
+  const weekEvents = events.filter((event) => event.timing === 'week');
   const lines = ['Birthday reminders'];
 
   if (todayEvents.length > 0) {
@@ -1237,6 +1239,10 @@ function formatBirthdayReminderMessage(events) {
 
   if (tomorrowEvents.length > 0) {
     lines.push(`Tomorrow (${tomorrowEvents[0].shortDate}): ${joinLabels(tomorrowEvents)}`);
+  }
+
+  if (weekEvents.length > 0) {
+    lines.push(`In one week (${weekEvents[0].shortDate}): ${joinLabels(weekEvents)}`);
   }
 
   return lines.join('\n');

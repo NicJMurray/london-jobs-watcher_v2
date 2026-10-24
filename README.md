@@ -107,9 +107,11 @@ The old `/test-telegram` and `/test-latest-jobs` routes have been removed.
 | `POST /run-birthday-reminders?notify=true` | Authenticated manual reminder sending. |
 | `POST /telegram-webhook` | Authenticated bot commands from the configured chat. |
 
-The scheduled reminder check runs at 08:00 Europe/London and checks today and
-tomorrow. Dates live in `src/birthdays.js`; successful deliveries are deduplicated
-under the separate `birthday-reminders-v1` KV key. The webhook uses the same
+The scheduled reminder check runs at 08:00 Europe/London and checks today,
+tomorrow, and seven calendar days ahead for birthdays and anniversaries. Each
+timing is deduplicated separately, so a week-ahead reminder does not suppress
+tomorrow's or the day's reminder. Dates live in `src/birthdays.js`; successful
+deliveries are deduplicated under the separate `birthday-reminders-v1` KV key. The webhook uses the same
 existing secret and fails closed when that secret is missing. Job checks and
 reminders fail independently.
 
