@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { COMPANIES } from '../src/companies.js';
-import { fetchCompanyJobs, isLondonJob } from '../src/parsers.js';
+import { fetchCompanyJobs, isLondonJob, extractRevolutPositions } from '../src/parsers.js';
 
 const company = (slug) => COMPANIES.find((entry) => entry.slug === slug);
 const json = (data) => Response.json(data);
@@ -55,14 +55,15 @@ test('Skyscanner uses its current Ashby board and excludes unlisted roles', asyn
   assert.deepEqual((await fetchCompanyJobs(company('skyscanner'))).map((job) => job.key), ['skyscanner::listed']);
 });
 
-test('Revolut reads official Next data with reordered attributes and keeps stable UUIDs', async (t) => {
+test('Revolut parses official Next data and retains UUIDs through its source snapshot', async (t) => {
   const payload = { props: { pageProps: { positions: [{
     id: 'existing-uuid', text: 'Risk &amp; Policy', team: 'Risk',
     locations: [{ name: 'London', country: 'United Kingdom' }],
   }] } } };
+  const positions = extractRevolutPositions(`<script nonce="example" type="application/json" id="__NEXT_DATA__">${JSON.stringify(payload)}</script>`);
   t.mock.method(globalThis, 'fetch', async (url) => {
-    assert.equal(url, 'https://www.revolut.com/careers/');
-    return new Response(`<script nonce="example" type="application/json" id="__NEXT_DATA__">${JSON.stringify(payload)}</script>`);
+    assert.equal(url, company('revolut').snapshotUrl);
+    return json({ source: company('revolut').url, fetchedAt: new Date().toISOString(), positions });
   });
   const [job] = await fetchCompanyJobs(company('revolut'));
   assert.equal(job.key, 'revolut::existing-uuid');
@@ -71,9 +72,22 @@ test('Revolut reads official Next data with reordered attributes and keeps stabl
   assert.ok(isLondonJob(job));
 });
 
-test('Revolut missing its payload fails instead of silently reporting zero jobs', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => new Response('<html>Careers unavailable</html>'));
-  await assert.rejects(fetchCompanyJobs(company('revolut')), /missing its positions payload/);
+test('Revolut challenge pages cannot be published as empty snapshots', () => {
+  assert.throws(() => extractRevolutPositions('<html>Careers unavailable</html>'), /missing its positions payload/);
+});
+
+test('stale Revolut snapshots are failures rather than silently healthy results', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => json({
+    source: company('revolut').url, fetchedAt: '2020-01-01T00:00:00Z', positions: [],
+  }));
+  await assert.rejects(fetchCompanyJobs(company('revolut')), /older than six hours/);
+});
+
+test('Revolut snapshot must identify the official source', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => json({
+    source: 'https://wrong-source.example', fetchedAt: new Date().toISOString(), positions: [],
+  }));
+  await assert.rejects(fetchCompanyJobs(company('revolut')), /Invalid Revolut source snapshot/);
 });
 
 test('Microsoft retries a transient error then reads every page with stable IDs', async (t) => {

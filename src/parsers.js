@@ -279,28 +279,46 @@ async function fetchWorkdayJobs(company) {
 }
 
 async function fetchRevolutNextJobs(company) {
-  const html = await fetchText(company.url);
+  const snapshot = await fetchJson(company.snapshotUrl);
+  const fetchedAt = new Date(snapshot?.fetchedAt).getTime();
+  const age = Date.now() - fetchedAt;
+  if (!Number.isFinite(fetchedAt) || age > 6 * 60 * 60 * 1000 || age < -5 * 60 * 1000) {
+    throw new Error('Revolut source snapshot is missing or older than six hours; check its GitHub Actions refresh');
+  }
+  if (snapshot.source !== company.url || !Array.isArray(snapshot.positions)) {
+    throw new Error('Invalid Revolut source snapshot');
+  }
+  return snapshot.positions.map((position) => mapRevolutJob(company, position));
+}
+
+// Used by the GitHub Actions fetcher and its regression tests. Keep page parsing
+// separate from retrieval: the official page challenges Cloudflare Worker IPs.
+export function extractRevolutPositions(html) {
   const data = extractNextData(html);
   const positions = data?.props?.pageProps?.positions;
   if (!Array.isArray(positions)) {
     throw new Error('Revolut careers page is missing its positions payload');
   }
+  if (positions.some((position) => !position?.id || !position.text || !Array.isArray(position.locations))) {
+    throw new Error('Revolut positions payload has invalid records');
+  }
+  return positions;
+}
 
-  return positions.map((position) => {
-    const title = stripHtml(position.text);
-    const locations = arrayFrom(position.locations).map(revolutLocation).filter(Boolean);
-    const location = normalizeWhitespace(uniqueStrings(locations).join('; '));
-    const url = canonicalUrl(`/careers/position/${slugify(title)}-${position.id}/`, company.careersUrl || 'https://www.revolut.com');
+function mapRevolutJob(company, position) {
+  const title = stripHtml(position.text);
+  const locations = arrayFrom(position.locations).map(revolutLocation).filter(Boolean);
+  const location = normalizeWhitespace(uniqueStrings(locations).join('; '));
+  const url = canonicalUrl(`/careers/position/${slugify(title)}-${position.id}/`, company.careersUrl || 'https://www.revolut.com');
 
-    return normalizeJob(company, {
-      id: position.id || url,
-      title,
-      location,
-      office: location,
-      url,
-      postedAt: '',
-      searchText: [title, location, position.team].join(' '),
-    });
+  return normalizeJob(company, {
+    id: position.id || url,
+    title,
+    location,
+    office: location,
+    url,
+    postedAt: '',
+    searchText: [title, location, position.team].join(' '),
   });
 }
 

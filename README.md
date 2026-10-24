@@ -16,7 +16,13 @@ The same bot also handles birthday/anniversary reminders and `/birthdays` comman
 
 There is no browser automation, database, queue, or third-party scraping service.
 Most sources use their official recruiting APIs; the remaining ones expose job
-data in their public HTML. Network requests have a 45-second timeout covering the
+data in their public HTML. Revolut's page blocks Cloudflare Worker IPs, so an
+hourly GitHub Actions job fetches its official page and publishes `revolut.json`
+on the separate `source-data` branch. The Worker reads that public snapshot;
+snapshots older than six hours fail explicitly. Snapshot commits never deploy the
+Worker, and the refresh needs only GitHub's built-in repository token.
+
+Network requests have a 45-second timeout covering the
 body as well as the headers. A network failure, HTTP 429, or HTTP 5xx gets at most
 one retry; permanent HTTP errors fail immediately. Long `Retry-After` instructions
 are reported rather than ignored or allowed to stall the run.
@@ -35,7 +41,7 @@ Repairs made on 24 October 2026:
 | Company | Cause | Current source |
 | --- | --- | --- |
 | Fujifilm | The Europe iCIMS portal was retired and returned 404. | Workday board linked from [Fujifilm UK careers](https://www.fujifilm.com/uk/en/about/career), searched for London. Zero matching jobs is valid. |
-| Revolut | The third-party reader was rate-limited. | Positions data embedded directly in the official careers page, preserving the original UUID-based keys. Missing data is a failure, never a silent zero. |
+| Revolut | The third-party reader was rate-limited; direct Worker requests hit a browser challenge. | GitHub Actions fetches the official careers page hourly and publishes a source snapshot. Original UUIDs are preserved. Missing/stale data is a failure, never a silent zero. |
 | Microsoft | No HTTP failure reproduced during the review; the three-page cap did omit results. | Official Eightfold API, with one transient retry and up to ten pages. Missing/error payloads and truncated results fail explicitly. |
 | Skyscanner | The old Greenhouse board returns 404. | Official Ashby board used by Skyscanner's current careers page. Unlisted jobs are excluded. |
 
@@ -126,6 +132,7 @@ failure handling, and history preservation.
 | `src/parsers.js` | Source retrieval, normalisation, stable IDs, and London matching. |
 | `src/index.js` | HTTP page/API, cron, deduplication, Telegram, and reminders. |
 | `src/birthdays.js` | Personal dates. |
+| `scripts/refresh-revolut.mjs` | Fetch and validate Revolut's official positions data for the hourly Actions job. |
 | `test/` | Offline regression tests. |
 | `wrangler.jsonc` | Worker, domain, hourly cron, and existing KV bindings. |
 
