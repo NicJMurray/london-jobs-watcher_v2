@@ -1,47 +1,24 @@
 const REQUEST_TIMEOUT_MS = 45000;
 const HTML_CONTEXT_CHARS = 500;
 const BROWSER_USER_AGENT = 'Mozilla/5.0 (compatible; london-jobs-watcher/1.0; +https://workers.cloudflare.com/)';
-const REAL_BROWSER_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const LONDON_PATTERN = /\b(?:Greater\s+London|London|Hybrid\s+London)\b/i;
 const NON_UK_LONDON_PATTERN = /\bLondon\s*,?\s*(?:ON|Ontario|Canada)\b/i;
-const MONTH_INDEX = {
-  january: 0,
-  february: 1,
-  march: 2,
-  april: 3,
-  may: 4,
-  june: 5,
-  july: 6,
-  august: 7,
-  september: 8,
-  october: 9,
-  november: 10,
-  december: 11,
-};
 
 export async function fetchCompanyJobs(company) {
   switch (company.parserType) {
     case 'greenhouse':
       return fetchGreenhouseJobs(company);
-    case 'lever':
-      return fetchLeverJobs(company);
     case 'ashby':
       return fetchAshbyJobs(company);
     case 'apple':
       return fetchAppleJobs(company);
     case 'spotify':
       return fetchSpotifyJobs(company);
-    case 'successfactors':
-      return fetchSuccessFactorsJobs(company);
     case 'workable':
       return fetchWorkableJobs(company);
     case 'workday':
       return fetchWorkdayJobs(company);
-    case 'icims':
-      return fetchIcimsJobs(company);
-    case 'paradox':
-      return fetchParadoxJobs(company);
     case 'revolut-next':
       return fetchRevolutNextJobs(company);
     case 'jibe':
@@ -216,51 +193,6 @@ async function fetchSpotifyJobs(company) {
   });
 }
 
-async function fetchSuccessFactorsJobs(company) {
-  const locale = company.locale || 'en_GB';
-  const locationQuery = company.locationQuery || 'London';
-  const sortBy = company.sortBy || 'recent';
-  const keywords = company.keywords || '';
-  const maxPages = company.maxPages || 10;
-  const passes = company.passes || 2;
-  const jobs = [];
-  const seenIds = new Set();
-  let totalJobs = 0;
-
-  for (let pass = 0; pass < passes; pass += 1) {
-    for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
-      const data = await postJson(company.url, {
-        keywords,
-        locale,
-        location: locationQuery,
-        pageNumber,
-        sortBy,
-      });
-      const pageJobs = Array.isArray(data?.jobSearchResult)
-        ? data.jobSearchResult.map((item) => item?.response || item).filter(Boolean)
-        : [];
-
-      if (!pageJobs.length) break;
-
-      totalJobs = Number(data?.totalJobs || totalJobs || 0);
-
-      for (const job of pageJobs) {
-        const id = normalizeWhitespace(String(job.id || job.jobReqId || job.requisitionId || ''));
-        if (!id || seenIds.has(id)) continue;
-
-        seenIds.add(id);
-        jobs.push(mapSuccessFactorsJob(company, job, locale));
-      }
-
-      if (totalJobs > 0 && seenIds.size >= totalJobs) break;
-    }
-
-    if (totalJobs > 0 && seenIds.size >= totalJobs) break;
-  }
-
-  return jobs;
-}
-
 async function fetchWorkableJobs(company) {
   const data = await fetchJson(company.url);
   const jobs = Array.isArray(data?.jobs) ? data.jobs : Array.isArray(data) ? data : [];
@@ -324,7 +256,10 @@ async function fetchWorkdayJobs(company) {
         offset: page * pageSize,
         searchText: query,
       });
-      const pageJobs = Array.isArray(data?.jobPostings) ? data.jobPostings : [];
+      if (!Array.isArray(data?.jobPostings) || !Number.isFinite(data.total)) {
+        throw new Error('Workday response is missing jobPostings or total');
+      }
+      const pageJobs = data.jobPostings;
 
       if (!pageJobs.length) break;
 
@@ -343,95 +278,13 @@ async function fetchWorkdayJobs(company) {
   return jobs;
 }
 
-async function fetchIcimsJobs(company) {
-  const html = await fetchText(company.url);
-  const itemRegex = /<li\b[^>]*class="[^"]*\biCIMS_JobCardItem\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
-  const jobs = [];
-  let match;
-
-  while ((match = itemRegex.exec(html)) !== null) {
-    const block = match[1];
-    const link = block.match(/<a\b[^>]*href="([^"]+)"[^>]*class="[^"]*\biCIMS_Anchor\b[^"]*"[^>]*title="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!link) continue;
-
-    const url = cleanIcimsUrl(canonicalUrl(decodeHtml(link[1]), company.url));
-    const title = stripHtml(link[3]).replace(/^Job Posting Title\s*/i, '') || titleFromUrl(url);
-    const location = extractIcimsField(block, 'Job Locations');
-    const id = extractIcimsField(block, 'ID') || matchFirst(url, [/\/jobs\/(\d+)\//]) || url;
-    const postedAt = normalizeIcimsDate(matchFirst(block, [/<span\b[^>]*title="([^"]+)"[^>]*>\s*[^<]*<span class="sr-only">/i]));
-
-    jobs.push(
-      normalizeJob(company, {
-        id,
-        title,
-        location,
-        office: location,
-        url,
-        postedAt,
-        searchText: [title, location, stripHtml(block)].join(' '),
-      }),
-    );
-  }
-
-  return jobs;
-}
-
-async function fetchParadoxJobs(company) {
-  const entryUrl = company.careersUrl || new URL(company.url).origin;
-  const page = await fetchTextWithRetry(entryUrl, {
-    headers: browserHeaders('text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', REAL_BROWSER_USER_AGENT),
-  });
-  const cookie = cookieHeaderFromSetCookie(page.headers);
-  const jobs = [];
-  const seenIds = new Set();
-  const pageSize = company.pageSize || 20;
-  const maxPages = company.maxPages || 5;
-
-  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
-    const url = new URL(company.url);
-    if (company.keyword) url.searchParams.set('keyword', company.keyword);
-    if (company.locationQuery) url.searchParams.set('location_name', company.locationQuery);
-    if (company.locationType) url.searchParams.set('location_type', company.locationType);
-    if (company.radius != null) url.searchParams.set('radius', String(company.radius));
-    url.searchParams.set('page_size', String(pageSize));
-    url.searchParams.set('page_number', String(pageNumber));
-
-    const data = await postJsonWithRetry(
-      url.toString(),
-      {
-        disable_switch_search_mode: Boolean(company.disableSwitchSearchMode),
-        site_available_languages: company.siteAvailableLanguages || ['en'],
-      },
-      {
-        ...browserHeaders('application/json, text/plain, */*', REAL_BROWSER_USER_AGENT),
-        'content-type': 'application/json',
-        origin: new URL(entryUrl).origin,
-        referer: entryUrl,
-        ...(cookie ? { cookie } : {}),
-      },
-    );
-    const pageJobs = Array.isArray(data?.jobs) ? data.jobs : [];
-
-    if (!pageJobs.length) break;
-
-    for (const job of pageJobs) {
-      const id = normalizeWhitespace(String(job.requisitionID || job.reference || job.uniqueID || job.sourceID || job.originalURL || ''));
-      if (!id || seenIds.has(id)) continue;
-
-      seenIds.add(id);
-      jobs.push(mapParadoxJob(company, job));
-    }
-
-    if (Number(data?.totalJob || 0) <= seenIds.size || pageJobs.length < pageSize) break;
-  }
-
-  return jobs;
-}
-
 async function fetchRevolutNextJobs(company) {
-  const html = await fetchReaderHtml(company.url);
+  const html = await fetchText(company.url);
   const data = extractNextData(html);
-  const positions = Array.isArray(data?.props?.pageProps?.positions) ? data.props.pageProps.positions : [];
+  const positions = data?.props?.pageProps?.positions;
+  if (!Array.isArray(positions)) {
+    throw new Error('Revolut careers page is missing its positions payload');
+  }
 
   return positions.map((position) => {
     const title = stripHtml(position.text);
@@ -459,7 +312,7 @@ async function fetchJibeJobs(company) {
 
   for (let page = 1; page <= maxPages; page += 1) {
     const url = urlWithSearchParam(company.url, 'page', page === 1 ? '' : String(page));
-    const data = await fetchJibeJson(url);
+    const data = await fetchJson(url);
     const pageJobs = Array.isArray(data?.jobs) ? data.jobs : [];
 
     if (!pageJobs.length) break;
@@ -477,16 +330,6 @@ async function fetchJibeJobs(company) {
   }
 
   return jobs;
-}
-
-async function fetchJibeJson(url) {
-  try {
-    return await fetchJson(url);
-  } catch (error) {
-    if (!/HTTP 404|Expected JSON/i.test(errorMessage(error))) throw error;
-    await delay(350);
-    return fetchJson(url);
-  }
 }
 
 async function fetchEightfoldEmbeddedJobs(company) {
@@ -534,10 +377,17 @@ async function fetchEightfoldPcsxJobs(company) {
     if (company.sortBy) url.searchParams.set('sort_by', company.sortBy);
 
     const data = await fetchJson(url.toString());
-    const pageJobs = Array.isArray(data?.data?.positions) ? data.data.positions : [];
-    totalCount = Number(data?.data?.count || totalCount || 0);
+    if ((data?.status != null && data.status !== 200)
+        || !Array.isArray(data?.data?.positions) || !Number.isFinite(data.data.count)) {
+      throw new Error('Eightfold search response is missing positions/count or reports an error');
+    }
+    const pageJobs = data.data.positions;
+    totalCount = data.data.count;
 
-    if (!pageJobs.length) break;
+    if (!pageJobs.length) {
+      if (seenIds.size < totalCount) throw new Error(`Eightfold returned an empty page before all ${totalCount} jobs were read`);
+      break;
+    }
 
     for (const job of pageJobs) {
       const id = normalizeWhitespace(String(job.displayJobId || job.atsJobId || job.id || job.positionUrl || ''));
@@ -548,9 +398,11 @@ async function fetchEightfoldPcsxJobs(company) {
     }
 
     if (totalCount > 0 && seenIds.size >= totalCount) break;
-    if (pageJobs.length < pageSize) break;
   }
 
+  if (seenIds.size < totalCount) {
+    throw new Error(`Eightfold search was truncated: read ${seenIds.size} of ${totalCount} jobs`);
+  }
   return jobs;
 }
 
@@ -598,34 +450,6 @@ async function fetchMetaGraphqlJobs(company) {
   });
 }
 
-function mapSuccessFactorsJob(company, job, locale) {
-  const title = stripHtml(job.unifiedStandardTitle || job.title || job.jobTitle);
-  const location = normalizeWhitespace(
-    uniqueStrings([
-      ...arrayFrom(job.sfstd_jobLocation_obj).map(stripHtml),
-      ...arrayFrom(job.jobLocationShort).map(stripHtml),
-    ]).join(', '),
-  );
-  const department = uniqueStrings([...arrayFrom(job.filter2), ...arrayFrom(job.filter4)]).map(stripHtml).join(', ');
-  const id = normalizeWhitespace(String(job.id || job.jobReqId || job.requisitionId || ''));
-  const urlTitle = normalizeWhitespace(decodeHtml(job.urlTitle || job.unifiedUrlTitle || slugify(title)));
-  const baseUrl = (company.careersUrl || new URL(company.url).origin).replace(/\/$/, '');
-  const url = `${baseUrl}/job/${urlTitle}/${id}-${locale}/`;
-
-  return normalizeJob(company, {
-    id: id || url,
-    title,
-    location,
-    office: location,
-    url,
-    postedAt: normalizeSuccessFactorsDate(
-      job.postedDate || job.postingDate || job.createdDate || job.requisitionOpenDate,
-    ),
-    closingAt: normalizeSuccessFactorsDate(job.unifiedStandardEnd || job.jobEndDate || job.endDate),
-    searchText: [title, location, department].join(' '),
-  });
-}
-
 function mapWorkdayJob(company, job, locationHint = '') {
   const title = stripHtml(job.title);
   const baseLocation = normalizeWhitespace(job.locationsText || arrayFrom(job.locations).map(collectNames).flat().join('; '));
@@ -645,28 +469,6 @@ function mapWorkdayJob(company, job, locationHint = '') {
     url,
     postedAt: normalizeWorkdayPostedOn(job.postedOn),
     searchText: [title, location, categories, locationHint].join(' '),
-  });
-}
-
-function mapParadoxJob(company, job) {
-  const title = stripHtml(job.title);
-  const location = normalizeWhitespace(uniqueStrings(arrayFrom(job.locations).map(paradoxLocation).filter(Boolean)).join('; '));
-  const fieldValues = uniqueStrings([
-    ...arrayFrom(job.employmentType),
-    ...arrayFrom(job.employmentStatus),
-    ...arrayFrom(job.customFields).map((field) => field?.value),
-    ...arrayFrom(job.jobCardExtraFields).flatMap((field) => arrayFrom(field?.value)),
-  ]).join(', ');
-  const url = canonicalUrl(job.originalURL || job.applyURL, company.careersUrl || company.url);
-
-  return normalizeJob(company, {
-    id: job.requisitionID || job.reference || job.uniqueID || job.sourceID || url,
-    title,
-    location,
-    office: location,
-    url,
-    postedAt: normalizeDate(job.datePosted || job.postedDate || job.createDate),
-    searchText: [title, location, fieldValues].join(' '),
   });
 }
 
@@ -716,7 +518,7 @@ async function postMetaGraphql(company, metaConfig, variables) {
     doc_id: company.graphqlDocId,
   });
 
-  const response = await fetchWithTimeout(company.graphqlUrl || 'https://www.metacareers.com/api/graphql/', {
+  const { text } = await requestText(company.graphqlUrl || 'https://www.metacareers.com/api/graphql/', {
     method: 'POST',
     headers: {
       accept: '*/*',
@@ -733,11 +535,6 @@ async function postMetaGraphql(company, metaConfig, variables) {
     },
     body,
   });
-
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
-  }
 
   try {
     return JSON.parse(text.replace(/^for \(;;\);/, ''));
@@ -825,16 +622,6 @@ function workdayJobUrl(company, externalPath) {
   return canonicalUrl(`${baseUrl}/${path.replace(/^\//, '')}`, baseUrl);
 }
 
-function paradoxLocation(location) {
-  if (!location || typeof location !== 'object') return normalizeWhitespace(location);
-
-  return normalizeWhitespace(
-    location.locationText
-      || location.locationParsedText
-      || [location.city || location.locationName, location.state || location.stateAbbr, location.country].filter(Boolean).join(', '),
-  );
-}
-
 function revolutLocation(location) {
   if (!location || typeof location !== 'object') return normalizeWhitespace(location);
 
@@ -843,34 +630,6 @@ function revolutLocation(location) {
   if (!name) return country;
   if (!country || name.toLowerCase().includes(country.toLowerCase())) return name;
   return `${name}, ${country}`;
-}
-
-function extractIcimsField(block, label) {
-  const srOnlyPattern = new RegExp(`<span class="sr-only field-label">\\s*${escapeRegExp(label)}\\s*<\\/span>\\s*<span[^>]*>([\\s\\S]*?)<\\/span>`, 'i');
-  const srOnlyMatch = block.match(srOnlyPattern);
-  if (srOnlyMatch) return stripHtml(srOnlyMatch[1]);
-
-  const definitionPattern = new RegExp(`<dt[^>]*>\\s*${escapeRegExp(label)}\\s*<\\/dt>\\s*<dd[^>]*>([\\s\\S]*?)<\\/dd>`, 'i');
-  const definitionMatch = block.match(definitionPattern);
-  return definitionMatch ? stripHtml(definitionMatch[1]) : '';
-}
-
-function cleanIcimsUrl(url) {
-  if (!url) return '';
-
-  try {
-    const parsed = new URL(url);
-    ['in_iframe', 'hashed', 'mobile', 'needsRedirect'].forEach((key) => parsed.searchParams.delete(key));
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-function normalizeIcimsDate(value) {
-  const normalized = normalizeWhitespace(value);
-  if (!normalized) return '';
-  return normalizeDate(`${normalized} GMT`);
 }
 
 function mapJibeJob(company, job) {
@@ -919,23 +678,6 @@ export function isLondonJob(job) {
   return ukRemote && LONDON_PATTERN.test(supportingText);
 }
 
-export async function verifyJobIsOpenForAlert(job, now = new Date()) {
-  if (job.companySlug !== 'bbc') return { open: true };
-
-  const html = await fetchText(job.url);
-  const closingAt = extractBbcJobClosingDate(html);
-  if (!closingAt) return { open: true };
-
-  if (dateOnlyTimestamp(closingAt) < dateOnlyTimestamp(now)) {
-    return {
-      open: false,
-      reason: `closed on ${closingAt.slice(0, 10)}`,
-    };
-  }
-
-  return { open: true, closingAt };
-}
-
 async function fetchGreenhouseJobs(company) {
   const data = await fetchJson(company.url);
   const jobs = Array.isArray(data?.jobs) ? data.jobs : Array.isArray(data) ? data : [];
@@ -957,34 +699,11 @@ async function fetchGreenhouseJobs(company) {
   });
 }
 
-async function fetchLeverJobs(company) {
-  const data = await fetchJson(company.url);
-  const jobs = Array.isArray(data) ? data : [];
-
-  return jobs.map((job) => {
-    const allLocations = Array.isArray(job.categories?.allLocations)
-      ? job.categories.allLocations.join(', ')
-      : '';
-    const location = normalizeWhitespace(job.categories?.location || allLocations || '');
-    const office = normalizeWhitespace(allLocations);
-
-    return normalizeJob(company, {
-      id: job.id || job.hostedUrl,
-      title: job.text,
-      location,
-      office,
-      url: job.hostedUrl || job.applyUrl,
-      postedAt: normalizeLeverTimestamp(job.createdAt),
-      searchText: [job.text, location, office, job.categories?.team, job.categories?.department].join(' '),
-    });
-  });
-}
-
 async function fetchAshbyJobs(company) {
   const data = await fetchJson(company.url);
   const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
 
-  return jobs.map((job) => {
+  return jobs.filter((job) => job.isListed !== false).map((job) => {
     const secondaryLocations = Array.isArray(job.secondaryLocations)
       ? job.secondaryLocations.map((location) => location.location).filter(Boolean).join(', ')
       : '';
@@ -1066,11 +785,11 @@ function extractLinks(html, baseUrl) {
 }
 
 function extractNextData(html) {
-  const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  const match = html.match(/<script\b[^>]*\bid=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
   if (!match) return null;
 
   try {
-    return JSON.parse(decodeHtml(match[1]));
+    return JSON.parse(match[1]);
   } catch {
     return null;
   }
@@ -1176,20 +895,9 @@ function locationFromText(text) {
 }
 
 async function fetchJson(url) {
-  const response = await fetchWithTimeout(url, {
+  return requestJson(url, {
     headers: { accept: 'application/json' },
   });
-
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Expected JSON but received: ${text.slice(0, 160)}`);
-  }
 }
 
 async function postJson(url, body) {
@@ -1200,17 +908,15 @@ async function postJson(url, body) {
 }
 
 async function postJsonWithHeaders(url, body, headers) {
-  const response = await fetchWithTimeout(url, {
+  return requestJson(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
   });
+}
 
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
-  }
-
+async function requestJson(url, init) {
+  const { text } = await requestText(url, init);
   try {
     return JSON.parse(text);
   } catch {
@@ -1218,135 +924,59 @@ async function postJsonWithHeaders(url, body, headers) {
   }
 }
 
-async function postJsonWithRetry(url, body, headers, maxAttempts = 2) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-    const text = await response.text();
-
-    if (response.ok) {
-      try {
-        return JSON.parse(text);
-      } catch {
-        throw new Error(`Expected JSON but received: ${text.slice(0, 160)}`);
-      }
-    }
-
-    if ((response.status === 403 || response.status === 429) && attempt < maxAttempts) {
-      await delay(readerRetryDelayMs(response.headers, text));
-      continue;
-    }
-
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
-  }
-
-  throw new Error('POST JSON retry failed');
-}
-
 async function fetchText(url) {
   const { text } = await fetchTextWithHeaders(url);
   return text;
 }
 
-async function fetchTextWithRetry(url, init = {}, maxAttempts = 2) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await fetchTextWithHeaders(url, init);
-    } catch (error) {
-      if (!/HTTP (?:403|429)/i.test(errorMessage(error)) || attempt >= maxAttempts) throw error;
-      await delay(5000);
-    }
-  }
-
-  throw new Error('Text retry failed');
-}
-
 async function fetchTextWithHeaders(url, init = {}) {
-  const response = await fetchWithTimeout(url, {
+  return requestText(url, {
     ...init,
     headers: {
       accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       ...init.headers,
     },
   });
-
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
-  }
-
-  return { text, headers: response.headers };
 }
 
-async function fetchReaderHtml(url) {
-  const maxAttempts = 3;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await fetchWithTimeout(url, {
-      headers: {
-        ...browserHeaders('text/html,*/*;q=0.8'),
-        'x-return-format': 'html',
-      },
-    });
-    const text = await response.text();
-
-    if (response.ok) return text;
-
-    if (response.status === 429 && attempt < maxAttempts) {
-      await delay(readerRetryDelayMs(response.headers, text));
-      continue;
+// One bounded retry for transient source failures. Read the body before releasing
+// the timeout; a server can send headers promptly and then stall indefinitely.
+async function requestText(url, init = {}) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let response;
+    let text;
+    try {
+      response = await fetch(url, { redirect: 'follow', ...init, signal: controller.signal });
+      text = await response.text();
+    } catch (error) {
+      if (attempt === 1) {
+        if (error?.name === 'AbortError') throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
     }
 
-    throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
-  }
-
-  throw new Error('Reader fetch failed');
-}
-
-async function fetchWithTimeout(url, init = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    return await fetch(url, {
-      redirect: 'follow',
-      ...init,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+    if (response && text != null) {
+      if (response.ok) return { text, headers: response.headers };
+      const transient = response.status === 429 || response.status >= 500;
+      if (!transient || attempt === 1) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 160)}`);
+      }
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
+    const retryAfter = Number(response?.headers.get('retry-after')) || 0.5;
+    // Do not hammer a source asking for a long cooldown, or sleep through the run.
+    if (retryAfter > 5 && response && text != null) {
+      throw new Error(`HTTP ${response.status}: retry after ${retryAfter}s`);
+    }
+    await delay(Math.max(retryAfter * 1000, 0));
   }
 }
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function readerRetryDelayMs(headers, text) {
-  const retryAfterHeader = Number(headers.get('retry-after'));
-  if (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0) {
-    return Math.min(retryAfterHeader * 1000, 20000);
-  }
-
-  try {
-    const parsed = JSON.parse(text);
-    const retryAfter = Number(parsed?.retryAfter);
-    if (Number.isFinite(retryAfter) && retryAfter > 0) {
-      return Math.min(retryAfter * 1000, 20000);
-    }
-  } catch {
-    // Fall through to a short default backoff.
-  }
-
-  return 5000;
 }
 
 function normalizeJob(company, job) {
@@ -1371,56 +1001,10 @@ function normalizeJob(company, job) {
   };
 }
 
-function normalizeLeverTimestamp(value) {
-  if (!value) return '';
-  if (typeof value === 'number') return normalizeDate(new Date(value).toISOString());
-  return normalizeDate(value);
-}
-
 function normalizeAppleDate(value) {
   const normalized = normalizeWhitespace(value);
   if (!normalized) return '';
   return normalizeDate(`${normalized} 00:00:00 GMT`);
-}
-
-function normalizeSuccessFactorsDate(value) {
-  const normalized = normalizeWhitespace(value);
-  const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (match) return normalizeDate(`${match[3]}-${match[2]}-${match[1]}T00:00:00Z`);
-  return normalizeHumanDate(normalized) || normalizeDate(normalized);
-}
-
-function extractBbcJobClosingDate(html) {
-  const text = normalizeWhitespace(stripHtml(html));
-  const match = text.match(
-    /Job Closing Date:\s*(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}|\d{1,2}\/\d{1,2}\/\d{4})/i,
-  );
-
-  if (!match) return '';
-
-  return normalizeSuccessFactorsDate(match[1]);
-}
-
-function normalizeHumanDate(value) {
-  const normalized = normalizeWhitespace(value);
-  const match = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})\b/i);
-  if (!match) return '';
-
-  const month = MONTH_INDEX[match[2].toLowerCase()];
-  if (month == null) return '';
-
-  const day = Number(match[1]);
-  const year = Number(match[3]);
-  if (!Number.isInteger(day) || !Number.isInteger(year) || day < 1 || day > 31) return '';
-
-  return new Date(Date.UTC(year, month, day)).toISOString();
-}
-
-function dateOnlyTimestamp(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return Number.NaN;
-
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 function normalizeWorkdayPostedOn(value) {
@@ -1468,11 +1052,11 @@ function collectNames(value) {
   return [normalizeWhitespace(String(value))];
 }
 
-function browserHeaders(accept, userAgent = BROWSER_USER_AGENT) {
+function browserHeaders(accept) {
   return {
     accept,
     'accept-language': 'en-GB,en;q=0.9',
-    'user-agent': userAgent,
+    'user-agent': BROWSER_USER_AGENT,
   };
 }
 
@@ -1630,10 +1214,6 @@ function slugify(value) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function errorMessage(error) {
-  return String(error?.message || error || 'Unknown error');
 }
 
 function stripHtml(input) {

@@ -1,6 +1,6 @@
 import { BIRTHDAY_EVENTS } from './birthdays.js';
 import { COMPANIES } from './companies.js';
-import { fetchCompanyJobs, isLondonJob, verifyJobIsOpenForAlert } from './parsers.js';
+import { fetchCompanyJobs, isLondonJob } from './parsers.js';
 
 const SEEN_KV_KEY = 'seen-jobs-v1';
 const BIRTHDAY_REMINDER_KV_KEY = 'birthday-reminders-v1';
@@ -43,23 +43,32 @@ export default {
         });
       }
 
-      if (['GET', 'POST'].includes(request.method) && url.pathname === '/test-telegram') {
-        const message = `london-jobs-watcher test message\n${new Date().toISOString()}`;
-        await sendTelegramMessage(env, message);
-        return jsonResponse({ ok: true, sent: true });
-      }
-
-      if (['GET', 'POST'].includes(request.method) && url.pathname === '/test-latest-jobs') {
-        const includeDisabled = url.searchParams.get('includeDisabled') === 'true';
-        const shardOptions = parseShardSearchParams(url.searchParams);
-        const result = await runLatestJobsTest(env, { includeDisabled, ...shardOptions });
-        const status = result.notification?.error ? 502 : 200;
-        return jsonResponse(result, { status });
+      if (request.method === 'GET' && url.pathname === '/check') {
+        const slug = url.searchParams.get('company');
+        if (!slug) {
+          return jsonResponse({ companies: COMPANIES.map(({ name, slug, enabled }) => ({ name, slug, enabled })) });
+        }
+        const company = COMPANIES.find((company) => company.slug === slug);
+        if (!company) return jsonResponse({ ok: false, error: 'Unknown company' }, { status: 400 });
+        const result = await checkCompany(company);
+        if (!result.ok) return jsonResponse(result, { status: 502 });
+        const londonJobs = result.jobs.filter(isLondonJob);
+        return jsonResponse({
+          ok: true,
+          company: company.name,
+          totalJobs: result.jobs.length,
+          londonJobs: londonJobs.length,
+          sample: londonJobs.slice(0, 5),
+        });
       }
 
       if (['GET', 'POST'].includes(request.method) && url.pathname === '/run-now') {
-        const shouldNotify = url.searchParams.get('notify') !== 'false';
-        const shouldSaveSeen = url.searchParams.get('save') !== 'false';
+        const shouldNotify = url.searchParams.get('notify') === 'true';
+        const shouldSaveSeen = url.searchParams.get('save') === 'true';
+        if ((shouldNotify || shouldSaveSeen)
+            && (request.method !== 'POST' || !await isAuthorized(request, env))) {
+          return jsonResponse({ ok: false, error: 'Side effects require an authenticated POST' }, { status: 401 });
+        }
         const shardOptions = parseShardSearchParams(url.searchParams);
         const result = await runWatcher(env, {
           trigger: 'manual',
@@ -72,7 +81,10 @@ export default {
       }
 
       if (['GET', 'POST'].includes(request.method) && url.pathname === '/run-birthday-reminders') {
-        const shouldNotify = url.searchParams.get('notify') !== 'false';
+        const shouldNotify = url.searchParams.get('notify') === 'true';
+        if (shouldNotify && (request.method !== 'POST' || !await isAuthorized(request, env))) {
+          return jsonResponse({ ok: false, error: 'Sending reminders requires an authenticated POST' }, { status: 401 });
+        }
         const result = await runBirthdayReminders(env, {
           trigger: 'manual',
           notify: shouldNotify,
@@ -129,8 +141,10 @@ async function scraperPageResponse(env) {
 async function loadPublicScraperJobs(env) {
   const seenStore = await loadSeenStore(env);
   const now = new Date();
+  const activeCompanies = new Set(COMPANIES.filter((company) => company.enabled).map((company) => company.name));
 
   return Object.values(seenStore.jobs)
+    .filter((job) => activeCompanies.has(job.company))
     .map((job) => ({
       firstSeenAt: String(job.firstSeenAt || ''),
       company: String(job.company || ''),
@@ -710,15 +724,15 @@ async function runWatcher(env, options = {}) {
       };
 
       if (londonJob) {
-        const alertDecision = await shouldAlertNewLondonJob(job, startedAt);
+        const reason = staleAlertReason(job, startedAt);
 
-        if (!alertDecision.alert) {
+        if (reason) {
           run.skippedLondonAlerts.push({
             company: job.company,
             title: job.title,
             location: job.location || job.office || 'Location not listed',
             url: job.url,
-            reason: alertDecision.reason,
+            reason,
           });
           continue;
         }
@@ -783,22 +797,6 @@ function markTelegramSentJobs(seenJobs, jobs) {
   }
 }
 
-async function shouldAlertNewLondonJob(job, runStartedAt) {
-  const staleReason = staleAlertReason(job, runStartedAt);
-  if (staleReason) return { alert: false, reason: staleReason };
-
-  try {
-    const openCheck = await verifyJobIsOpenForAlert(job, runStartedAt);
-    if (!openCheck.open) {
-      return { alert: false, reason: openCheck.reason || 'job appears closed' };
-    }
-  } catch (error) {
-    console.warn(`Could not verify job is open for alert: ${job.key}`, error);
-  }
-
-  return { alert: true, reason: '' };
-}
-
 function staleAlertReason(job, runStartedAt) {
   if (!job.postedAt) return '';
 
@@ -809,91 +807,6 @@ function staleAlertReason(job, runStartedAt) {
   if (postedAt >= cutoff) return '';
 
   return `posted more than ${MAX_ALERT_JOB_AGE_DAYS} days ago (${postedAt.toISOString().slice(0, 10)})`;
-}
-
-async function runLatestJobsTest(env, options = {}) {
-  const startedAt = new Date().toISOString();
-  const allCompanies = COMPANIES.filter((company) => options.includeDisabled || company.enabled);
-  const disabledCompanies = COMPANIES.filter((company) => !company.enabled);
-  const companyShard = normalizeCompanyShard(options.companyShard, options.companyShards);
-  const companies = companyShard
-    ? allCompanies.filter((_, index) => index % companyShard.total === companyShard.index)
-    : allCompanies;
-  const companyResults = await mapWithConcurrency(
-    companies,
-    COMPANY_FETCH_CONCURRENCY,
-    async (company) => checkCompany(company),
-  );
-
-  const latestJobs = [];
-  const noJobs = [];
-  const failures = [];
-
-  for (const companyResult of companyResults) {
-    if (!companyResult.ok) {
-      failures.push(companyResult.failure);
-      continue;
-    }
-
-    const londonJobs = companyResult.jobs.filter(isLondonJob);
-    const latestJob = pickLatestJob(londonJobs);
-    if (!latestJob) {
-      noJobs.push(companyResult.company);
-      continue;
-    }
-
-    latestJobs.push({
-      company: latestJob.company,
-      title: latestJob.title,
-      location: latestJob.location || latestJob.office || 'Location not listed',
-      url: latestJob.url,
-      postedAt: latestJob.postedAt || '',
-    });
-  }
-
-  latestJobs.sort((a, b) => a.company.localeCompare(b.company));
-  noJobs.sort((a, b) => a.localeCompare(b));
-
-  const messages = formatLatestJobsTestMessages({
-    startedAt,
-    checkedCompanies: companies.length,
-    disabledCompanies: options.includeDisabled ? 0 : disabledCompanies.length,
-    latestJobs,
-    noJobs,
-    failures,
-  });
-
-  const notification = {
-    attempted: true,
-    sent: false,
-    messages: messages.length,
-    error: null,
-  };
-
-  try {
-    for (const message of messages) {
-      await sendTelegramMessage(env, message);
-    }
-    notification.sent = true;
-  } catch (error) {
-    notification.error = errorMessage(error);
-    console.error('Latest jobs test Telegram notification failed', error);
-  }
-
-  return {
-    ok: !notification.error,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    checkedCompanies: companies.length,
-    totalCompanies: allCompanies.length,
-    disabledCompanies: options.includeDisabled ? 0 : disabledCompanies.length,
-    companyShard,
-    latestJobsCount: latestJobs.length,
-    noJobs,
-    failures,
-    notification,
-    latestJobs,
-  };
 }
 
 async function runBirthdayReminders(env, options = {}) {
@@ -988,11 +901,8 @@ async function runBirthdayReminders(env, options = {}) {
 }
 
 async function handleTelegramWebhook(request, env) {
-  if (env.TELEGRAM_WEBHOOK_SECRET) {
-    const secret = request.headers.get('x-telegram-bot-api-secret-token');
-    if (secret !== env.TELEGRAM_WEBHOOK_SECRET) {
-      return { ok: false, ignored: true, reason: 'invalid webhook secret' };
-    }
+  if (!await isAuthorized(request, env)) {
+    return { ok: false, ignored: true, reason: 'invalid webhook secret' };
   }
 
   const update = await request.json().catch(() => null);
@@ -1034,6 +944,20 @@ async function handleTelegramWebhook(request, env) {
   return { ok: true, ignored: true, reason: 'unknown command', command };
 }
 
+async function isAuthorized(request, env) {
+  const supplied = request.headers.get('x-telegram-bot-api-secret-token');
+  if (!supplied || !env.TELEGRAM_WEBHOOK_SECRET) return false;
+  const encoder = new TextEncoder();
+  const [actual, expected] = await Promise.all([supplied, env.TELEGRAM_WEBHOOK_SECRET]
+    .map((value) => crypto.subtle.digest('SHA-256', encoder.encode(value))));
+  // Compare fixed-length digests without short-circuiting on the first mismatch.
+  const bytes = new Uint8Array(actual);
+  const expectedBytes = new Uint8Array(expected);
+  let difference = 0;
+  for (let i = 0; i < bytes.length; i += 1) difference |= bytes[i] ^ expectedBytes[i];
+  return difference === 0;
+}
+
 async function checkCompany(company) {
   try {
     const jobs = await fetchCompanyJobs(company);
@@ -1049,17 +973,6 @@ async function checkCompany(company) {
     console.error(`${company.name}: ${failure.error}`);
     return { ok: false, failure };
   }
-}
-
-function pickLatestJob(jobs) {
-  if (!Array.isArray(jobs) || jobs.length === 0) return null;
-
-  return jobs
-    .map((job, index) => ({ job, index, timestamp: timestampFromDate(job.postedAt) }))
-    .sort((a, b) => {
-      if (a.timestamp !== b.timestamp) return b.timestamp - a.timestamp;
-      return a.index - b.index;
-    })[0].job;
 }
 
 async function loadSeenStore(env) {
@@ -1401,38 +1314,6 @@ function formatShortDate(dateParts) {
   return `${dateParts.day} ${MONTH_LABELS[dateParts.month - 1]}`;
 }
 
-function formatLatestJobsTestMessages(result) {
-  const blocks = result.latestJobs.map((job) => {
-    const lines = [
-      `${job.company} - ${job.title}`,
-      job.location,
-    ];
-
-    if (job.postedAt) {
-      lines.push(`Posted: ${formatDateForMessage(job.postedAt)}`);
-    }
-
-    lines.push(job.url);
-    return lines.join('\n');
-  });
-
-  if (result.noJobs.length > 0) {
-    blocks.push(`No parsed London jobs: ${result.noJobs.join(', ')}`);
-  }
-
-  if (result.failures.length > 0) {
-    blocks.push(`Failed companies: ${result.failures.map((failure) => failure.company).join(', ')}`);
-  }
-
-  const summaryLines = [
-    'Latest job listing test',
-    `${result.latestJobs.length} companies with parsed London jobs`,
-    `${result.checkedCompanies} checked, ${result.disabledCompanies} disabled skipped`,
-  ];
-
-  return chunkTelegramBlocks(summaryLines.join('\n'), blocks);
-}
-
 function chunkTelegramBlocks(header, blocks) {
   const chunks = [];
   let current = [];
@@ -1589,12 +1470,6 @@ function timestampFromDate(value) {
   if (!value) return 0;
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function formatDateForMessage(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toISOString().slice(0, 10);
 }
 
 function scheduledCompanyShard(scheduledTime) {

@@ -1,366 +1,137 @@
-![London Jobs Watcher](.github/readme-banner.svg)
-
 # London Jobs Watcher
 
-Cloudflare Worker at `scraper.njmurray.com` for monitoring selected careers sources, identifying newly discovered London roles, recording discovery history, and sending Telegram alerts. The same Worker also serves a 30-day public scrape log and runs birthday/anniversary reminders.
+A fetch-based Cloudflare Worker that watches company careers pages for new London
+jobs, sends Telegram alerts, and serves a [30-day discovery log](https://scraper.njmurray.com/).
+The same bot also handles birthday/anniversary reminders and `/birthdays` commands.
 
-The system is fetch-based. It does not run a headless browser, execute careers-site JavaScript, or use a relational database.
+## How it works
 
-## System topology
+1. The hourly cron checks one of three company shards. Each enabled company is
+   checked once every three hours, with up to six companies fetched concurrently.
+2. Source parsers return a common job shape with a stable `company::source-id` key.
+3. The Worker checks the `SEEN_JOBS` KV history, applies London and freshness rules,
+   and sends alerts for unseen London jobs.
+4. Discovery history is saved only after notification handling succeeds. Failed
+   Telegram delivery leaves the new jobs eligible for the next run.
 
-```mermaid
-flowchart TD
-    A["Hourly cron or manual route"] --> B["Company shard"]
-    B --> C["Source-specific parsers"]
-    C --> D["Normalised jobs"]
-    D --> E["London + freshness rules"]
-    E --> F["Cloudflare KV"]
-    E --> G["Telegram alerts"]
-    F --> H["Public scrape log"]
-```
+There is no browser automation, database, queue, or third-party scraping service.
+Most sources use their official recruiting APIs; the remaining ones expose job
+data in their public HTML. Network requests have a 45-second timeout covering the
+body as well as the headers. A network failure, HTTP 429, or HTTP 5xx gets at most
+one retry; permanent HTTP errors fail immediately. Long `Retry-After` instructions
+are reported rather than ignored or allowed to stall the run.
+Worker logs are enabled for investigating failures from the scheduled runs.
 
-`src/index.js` owns orchestration and external behaviour. `src/parsers.js` owns source retrieval and conversion into a shared job model. `src/companies.js` connects each company to the correct parser and its source-specific options.
+## Company configuration and source repairs
 
-## Worker entry points
+`src/companies.js` is the watchlist. Each entry provides `name`, `slug`, `url`,
+`parserType`, and `enabled`, with source-specific pagination/location options.
+There are 29 enabled companies and three paused sources. BBC, Adidas, and
+Decathlon have been removed from the watchlist and public results; their old KV
+records remain intact for deduplication/history.
 
-The default export exposes two Cloudflare handlers:
+Repairs made on 24 October 2026:
 
-- `fetch(request, env)` routes HTTP requests.
-- `scheduled(event, env, ctx)` starts hourly background work with `ctx.waitUntil()`.
+| Company | Cause | Current source |
+| --- | --- | --- |
+| Fujifilm | The Europe iCIMS portal was retired and returned 404. | Workday board linked from [Fujifilm UK careers](https://www.fujifilm.com/uk/en/about/career), searched for London. Zero matching jobs is valid. |
+| Revolut | The third-party reader was rate-limited. | Positions data embedded directly in the official careers page, preserving the original UUID-based keys. Missing data is a failure, never a silent zero. |
+| Microsoft | No HTTP failure reproduced during the review; the three-page cap did omit results. | Official Eightfold API, with one transient retry and up to ten pages. Missing/error payloads and truncated results fail explicitly. |
+| Skyscanner | The old Greenhouse board returns 404. | Official Ashby board used by Skyscanner's current careers page. Unlisted jobs are excluded. |
 
-The scheduled handler runs two independent tasks in parallel:
+Supported parser families are Greenhouse, Ashby, Workday, Workable, Jibe,
+Eightfold, Spotify, Apple, Meta GraphQL, Next.js-embedded data, and plain HTML.
+Unused Lever, Paradox, SuccessFactors, and iCIMS parsers have been removed, along
+with the BBC-only detail-page checks and duplicated retry implementations.
 
-1. one company-job shard;
-2. the birthday/anniversary reminder check.
+## Safe diagnostics
 
-An error in either scheduled task is caught and logged without cancelling the other.
-
-## Job-check scheduling
-
-The cron expression in `wrangler.jsonc` is:
+Start with a single company instead of running the entire watchlist:
 
 ```text
-0 * * * *
+GET /check
+GET /check?company=fujifilm
+GET /check?company=microsoft
+GET /check?company=revolut
 ```
 
-The enabled company list is divided into three deterministic shards. The shard index is:
+Without a company, `/check` lists the configured sources. With a slug, it fetches
+that source and returns total/London counts plus up to five sample London jobs.
+It never reads/writes KV or sends Telegram messages. A source failure returns
+HTTP 502 and its reason; a healthy board with no matching jobs returns HTTP 200.
 
-```js
-utcHour % 3
-```
+`GET /run-now?shard=0&shards=3` additionally compares one shard with existing KV
+history. Manual runs default to `notify=false` and `save=false`, so opening a URL
+cannot send alerts or consume discovery history. Omit shard parameters to check
+all enabled companies, but use a narrow diagnostic when possible.
 
-Within a shard, a company is included when:
+Sending alerts or saving history manually requires an explicit authenticated
+`POST /run-now?notify=true&save=true`, with the existing `TELEGRAM_WEBHOOK_SECRET`
+in the `x-telegram-bot-api-secret-token` header. Never put this secret in a URL.
+The old `/test-telegram` and `/test-latest-jobs` routes have been removed.
 
-```js
-companyIndex % 3 === shardIndex
-```
+## Matching, state, and public history
 
-This spreads source requests across three hours while still checking every enabled company once per three-hour cycle. Manual routes can override the shard count and index through `shard` and `shards` query parameters.
+- London includes Greater London and explicit London hybrid roles. Ontario is
+  excluded; a generic remote role mentioning the London office is not enough.
+- New jobs with a known posting date more than 14 days old are recorded without
+  alerts. Jobs with no date are eligible on first discovery.
+- Source IDs must remain stable. Changing them can rediscover historical jobs.
+- `SEEN_JOBS` stores `seen-jobs-v1`, a versioned JSON object keyed by job identity.
+  It includes all discovered jobs, including non-London roles, so an edited
+  location does not make an old job appear new.
+- The public log shows active companies' London discoveries from the last 30
+  days, up to 5,000 records. It is a discovery log, not proof a vacancy is still
+  open. Removed/paused companies are hidden without deleting stored records.
+- KV remains one JSON object: simple for this bot, but concurrent manual writes
+  can conflict with the scheduled run. Use read-only diagnostics routinely.
 
-Up to six company fetches run concurrently. `mapWithConcurrency()` preserves result order while a shared index assigns work to six asynchronous loops.
+## Routes
 
-## Company registry
-
-Each entry in `src/companies.js` contains the common fields:
-
-```js
-{
-  name: "Company",
-  slug: "company",
-  url: "https://example.com/jobs-source",
-  careersUrl: "https://example.com/careers",
-  parserType: "greenhouse",
-  enabled: true,
-  notes: "Reason for this source and parser."
-}
-```
-
-Parser-specific options can add location queries, pagination caps, alternate searches, locale values, GraphQL identifiers, office filters, or embedded-data keys.
-
-`enabled: false` removes a source from normal and test runs without deleting its configuration or investigation notes.
-
-## Parser dispatch
-
-`fetchCompanyJobs()` switches on `parserType` and supports:
-
-| Parser type | Source shape |
+| Route | Behaviour |
 | --- | --- |
-| `greenhouse` | Greenhouse public job-board JSON |
-| `next-greenhouse` | Greenhouse data embedded in Next.js page state |
-| `lever` | Lever postings API |
-| `ashby` | Ashby posting API |
-| `workday` | Workday CXS search API |
-| `successfactors` | SAP SuccessFactors Recruiting API |
-| `workable` | Workable-style job feeds |
-| `icims` | iCIMS careers HTML |
-| `jibe` | Jibe/iCIMS search API |
-| `paradox` | Paradox careers API |
-| `eightfold-embedded` | Eightfold data embedded in server-rendered HTML |
-| `eightfold-pcsx` | Eightfold PCSX search API |
-| `meta-graphql` | Meta careers Relay GraphQL |
-| `spotify` | Life at Spotify public API |
-| `apple` | Apple search hydration data |
-| `revolut-next` | Revolut Next.js positions data through a fetch-only reader |
-| `html` | Generic link extraction from server-rendered HTML |
+| `GET /health` | `OK`, without upstream requests. |
+| `GET /` or `/scraper` | Public HTML log, cached for five minutes. |
+| `GET /scraper.json` | Public log as JSON. |
+| `GET /check?company=slug` | Source-only, read-only diagnostic. |
+| `GET /run-now` | Read-only comparison with discovery history; optional `shard`/`shards`. |
+| `POST /run-now` | Same diagnostic; explicit `notify=true`/`save=true` require authentication. |
+| `GET /debug-seen?limit=25` | History count and up to 100 recent records. |
+| `GET /run-birthday-reminders` | Reminder preview; optional `date=YYYY-MM-DD` and `force=true`. |
+| `POST /run-birthday-reminders?notify=true` | Authenticated manual reminder sending. |
+| `POST /telegram-webhook` | Authenticated bot commands from the configured chat. |
 
-The generic HTML parser is a fallback. It extracts likely job links and nearby text but is less precise than a stable JSON endpoint. Sources whose useful content exists only after client-side JavaScript execution may return zero jobs and are normally disabled until a fetchable source is found.
+The scheduled reminder check runs at 08:00 Europe/London and checks today and
+tomorrow. Dates live in `src/birthdays.js`; successful deliveries are deduplicated
+under the separate `birthday-reminders-v1` KV key. The webhook uses the same
+existing secret and fails closed when that secret is missing. Job checks and
+reminders fail independently.
 
-All network helpers use a 45-second timeout. Several request paths retry transient failures, respect short upstream retry hints where available, and send browser-like headers when a careers site requires them.
+## Working on the bot
 
-## Normalised job model
-
-Every parser returns the same structure through `normalizeJob()`:
-
-```js
-{
-  key: "company-slug::stable-source-identity",
-  company: "Company",
-  companySlug: "company-slug",
-  title: "Role title",
-  location: "London, UK",
-  office: "London",
-  url: "https://example.com/jobs/123",
-  postedAt: "2026-07-24T00:00:00.000Z",
-  closingAt: "",
-  parserType: "greenhouse",
-  searchText: "combined text used for location matching"
-}
+```sh
+npm ci
+npm test
+npx wrangler deploy --dry-run
 ```
 
-Normalisation:
-
-- canonicalises relative and absolute URLs;
-- collapses whitespace;
-- creates a stable key from the company slug and source ID, falling back to URL or title/location;
-- converts several source-specific date formats into a comparable form;
-- ensures missing fields become empty strings rather than inconsistent `null` values.
-
-The stable key is the core identity invariant. If a parser changes how it derives `id`, old vacancies can appear new even when the underlying role has not changed.
-
-## London classification
-
-`isLondonJob()` examines:
-
-- title;
-- primary location;
-- office text;
-- parser-specific `searchText`.
-
-The initial positive patterns are `London`, `Greater London`, and `Hybrid London`.
-
-Additional safeguards then apply:
-
-1. `London, Ontario` is rejected unless UK/England/Greater London wording also appears.
-2. A title or primary location containing London is accepted directly.
-3. When no primary location exists, supporting office/search text may establish London.
-4. When the primary location is remote, hybrid, multiple, various, or anywhere, supporting text must indicate both the UK and London.
-
-This deliberately favours explicit London evidence over broad UK-remote wording.
-
-## Watcher run lifecycle
-
-`runWatcher()` follows this sequence:
-
-1. Load `seen-jobs-v1` from the `SEEN_JOBS` KV binding.
-2. Select enabled companies and the requested shard.
-3. Fetch and parse companies with concurrency limited to six.
-4. Keep source failures separate so one failure does not stop the run.
-5. De-duplicate repeated keys within the current run.
-6. Classify every parsed job as London or non-London.
-7. Skip any key already present in KV.
-8. Record every first-seen job, including non-London jobs.
-9. Evaluate new London jobs for freshness and open/closed status.
-10. Sort alertable jobs by company and title.
-11. Send one or more Telegram messages when required.
-12. Persist the updated KV state only when notification handling is safe.
-
-Storing non-London jobs is intentional. If an existing role is later edited to mention London, it does not become a false “new job” alert.
-
-## Freshness and open-role checks
-
-When `postedAt` is available, a newly discovered London role older than 14 days is stored but not alerted. This limits noisy historical backfill after:
-
-- adding a new company;
-- fixing a parser;
-- changing a stable ID;
-- clearing or replacing KV data.
-
-Most sources are treated as open when they are listed. BBC roles receive an extra detail-page check: a visible closing date earlier than the current date suppresses the alert.
-
-If an open-role verification request itself fails, the failure is logged and the role remains alertable. This avoids dropping a likely valid role because a secondary check was temporarily unavailable.
-
-## KV state
-
-The main KV value is stored under `seen-jobs-v1`:
-
-```json
-{
-  "version": 1,
-  "updatedAt": "2026-07-24T12:00:00.000Z",
-  "jobs": {
-    "company::job-id": {
-      "firstSeenAt": "2026-07-24T12:00:00.000Z",
-      "company": "Company",
-      "title": "Role title",
-      "location": "London",
-      "office": "London",
-      "url": "https://example.com/jobs/123",
-      "postedAt": "2026-07-23T00:00:00.000Z",
-      "closingAt": "",
-      "london": true,
-      "telegramSentAt": "2026-07-24T12:00:01.000Z"
-    }
-  }
-}
-```
-
-Legacy plain job-object data is accepted and wrapped into the version-one shape while loading.
-
-`telegramSentAt` is applied only after all alert chunks send successfully. If Telegram was attempted and fails, the newly changed seen store is not saved. The next run can therefore rediscover and retry the alert rather than permanently suppressing it.
-
-Manual runs can separate the two side effects:
-
-- `notify=false` performs checks without Telegram.
-- `save=false` prevents KV writes.
-- combining both produces a read-only diagnostic run.
-
-## Telegram alert behaviour
-
-No alert is sent when there are no new London jobs and at least one company check succeeded.
-
-A message is sent when:
-
-- one or more new London jobs are alertable; or
-- every company in the selected run failed.
-
-Each job block contains company, title, location, and URL. Failure names are appended as a warning when a run also finds jobs.
-
-Telegram messages are capped below the platform limit at 3,900 characters. `chunkTelegramBlocks()` keeps complete job blocks together and adds part numbering when multiple messages are required. Link previews are disabled.
-
-The runtime configuration values are:
-
-```text
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-TELEGRAM_WEBHOOK_SECRET
-```
-
-They are read from the Worker environment and are not stored in source files.
-
-## Public scrape log
-
-`/` and `/scraper` load data from KV and render HTML directly in the Worker. `/scraper.json` returns the same filtered window as JSON.
-
-A record is included when:
-
-1. company, title, URL, and a valid `firstSeenAt` exist;
-2. it was first seen within the last 30 days;
-3. it was either successfully sent to Telegram or still passes the London and freshness rules.
-
-Results are sorted newest-first by `firstSeenAt`, then by company and title, and capped at 5,000.
-
-The HTML contains the current records as an escaped JSON script block. Client-side JavaScript then handles keyword and company filters without additional server requests. The page is cached publicly for five minutes.
-
-This is a discovery log, not a live vacancy-status view. A role remains visible within the window even if the source removes it after discovery.
-
-## Birthday and anniversary subsystem
-
-`src/birthdays.js` stores entries as:
-
-```js
-{ name: "Example", date: "24/06" }
-{ name: "Example", date: "05/10", kind: "anniversary" }
-```
-
-Dates are validated as real `DD/MM` calendar dates. Missing `kind` defaults to `birthday`; an optional `label` overrides generated wording.
-
-The reminder task runs on every hourly cron invocation but exits unless the local time in `Europe/London` is `08:00`. It checks both today and tomorrow.
-
-De-duplication uses a separate `birthday-reminders-v1` value in the same KV namespace. Keys include the target date, timing (`today` or `tomorrow`), name, and configured date. A reminder is recorded only after Telegram succeeds.
-
-The webhook:
-
-1. optionally verifies `x-telegram-bot-api-secret-token`;
-2. ignores updates without a text message;
-3. ignores messages from any chat other than `TELEGRAM_CHAT_ID`;
-4. handles birthday/event aliases by returning the next three occurrences;
-5. handles `/start` and `/help`;
-6. ignores unknown commands.
-
-The next-occurrence calculation rolls events into the following year when their date has already passed.
-
-## HTTP routes
-
-| Route | Method | Side effects and purpose |
-| --- | --- | --- |
-| `/` or `/scraper` | `GET` | Render the current 30-day scrape log from KV. |
-| `/scraper.json` | `GET` | Return the same public record window as JSON. |
-| `/health` | `GET` | Return `OK` without touching external services. |
-| `/run-now` | `GET`/`POST` | Run job checks, optionally notify and save. |
-| `/test-latest-jobs` | `GET`/`POST` | Parse sources and send the latest London job per company without changing seen-job KV. |
-| `/test-telegram` | `GET`/`POST` | Send a simple Telegram test message. |
-| `/run-birthday-reminders` | `GET`/`POST` | Run or preview the birthday reminder calculation. |
-| `/debug-seen` | `GET` | Return the KV count and up to 100 recent records. |
-| `/telegram-webhook` | `POST` | Receive authenticated Telegram bot commands. |
-
-Useful query parameters:
-
-| Parameter | Route | Meaning |
-| --- | --- | --- |
-| `notify=false` | `/run-now`, birthday route | Suppress Telegram. |
-| `save=false` | `/run-now` | Suppress seen-job KV writes. |
-| `shard=0&shards=3` | job routes | Run a specific valid shard. |
-| `includeDisabled=true` | latest-jobs test | Include disabled company definitions. |
-| `date=YYYY-MM-DD` | birthday route | Calculate against a chosen date. |
-| `force=true` | birthday route | Ignore previous reminder de-duplication. |
-| `limit=25` | `/debug-seen` | Limit returned records, clamped to `1–100`. |
-
-## Failure model
-
-- A company parser failure becomes structured run data and does not stop other companies.
-- A missing KV binding stops routes that require state with a clear configuration error.
-- Invalid JSON or unsupported KV shapes are rejected instead of silently resetting history.
-- A Telegram failure produces a `502` on manual notification routes and prevents unsafe seen-state persistence.
-- Public page rendering depends only on KV, not on careers sites or Telegram.
-- Birthday and job scheduled tasks catch and log their failures independently.
-
-## File map
+The tests use recorded source shapes and mocked fetch/KV/Telegram boundaries;
+they never contact production or send messages. They cover source migrations,
+pagination, malformed payloads, bounded retries, safe diagnostics, notification
+failure handling, and history preservation.
 
 | File | Responsibility |
 | --- | --- |
-| `src/index.js` | HTTP routing, cron orchestration, sharding, concurrency, KV state, alert decisions, Telegram, public HTML/JSON, and reminders. |
-| `src/companies.js` | Company sources, parser selection, source-specific options, enable switches, and investigation notes. |
-| `src/parsers.js` | Fetching, retries, source parsers, date/URL normalisation, London classification, and open-role verification. |
-| `src/birthdays.js` | Birthday and anniversary source data. |
-| `scripts/set-telegram-webhook.mjs` | Webhook registration and bot command publication. |
-| `scripts/get-telegram-chat-id.mjs` | Chat-ID discovery helper. |
-| `wrangler.jsonc` | Worker entry point, custom domain, hourly cron, and KV binding. |
+| `src/companies.js` | Watchlist and source configuration. |
+| `src/parsers.js` | Source retrieval, normalisation, stable IDs, and London matching. |
+| `src/index.js` | HTTP page/API, cron, deduplication, Telegram, and reminders. |
+| `src/birthdays.js` | Personal dates. |
+| `test/` | Offline regression tests. |
+| `wrangler.jsonc` | Worker, domain, hourly cron, and existing KV bindings. |
 
-## Change map
-
-| Change | Main location |
-| --- | --- |
-| Add, pause, or repair a company | `src/companies.js` |
-| Add a new source type | parser function plus `fetchCompanyJobs()` dispatch in `src/parsers.js` |
-| Change London inclusion rules | `isLondonJob()` |
-| Change stable job identity | the relevant parser and `normalizeJob()` |
-| Change check cadence or shard count | `wrangler.jsonc` and `SCHEDULED_COMPANY_SHARDS` |
-| Change fetch concurrency | `COMPANY_FETCH_CONCURRENCY` |
-| Change alert freshness | `MAX_ALERT_JOB_AGE_DAYS` |
-| Change public history window | `PUBLIC_SCRAPER_WINDOW_DAYS` |
-| Change message format | Telegram formatting functions in `src/index.js` |
-| Change reminder hour or timezone | reminder constants at the top of `src/index.js` |
-| Add or edit a personal date | `src/birthdays.js` |
-
-## Design constraints
-
-- Parsers must remain fetch-based to fit the Cloudflare Worker runtime.
-- Careers sources are external and can change without notice; `notes` in the company registry are part of the maintenance record.
-- A stable source ID is more important than a pretty URL because it controls de-duplication.
-- KV stores the complete seen history as one JSON object. This is simple but will eventually need partitioning if the history becomes very large.
-- The public page reflects first discovery, not continuous proof that every role is still open.
-
-
-## Updating and publishing
-
-The live app is https://scraper.njmurray.com/. Make changes in this repository, run its checks, and push to `main`. GitHub Actions publishes the change to Cloudflare automatically after a successful build. See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact commands, resources, and production checks.
+Keep `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `TELEGRAM_WEBHOOK_SECRET` in
+Cloudflare secrets or ignored `.dev.vars`, never source or logs. Preserve the
+current KV namespace and its contents. When publishing, push checked source to
+`main`; GitHub Actions runs tests and deploys through Wrangler. Verify that exact
+commit and the live health/page/source checks before reporting success. See
+[DEPLOYMENT.md](DEPLOYMENT.md).
